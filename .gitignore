@@ -1,0 +1,8 @@
+node_modules/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+docs/superpowers/plans/
+.omo/evidence/

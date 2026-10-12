@@ -1,0 +1,137 @@
+import { execFile as execFileCallback } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFile = promisify(execFileCallback);
+const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+
+export function createOpenCodeBackend({
+  command = "opencode",
+  run = (args, options) => runOpenCodeCli(command, args, options),
+} = {}) {
+  async function request(method, path, body, timeoutMs = DEFAULT_TIMEOUT_MS) {
+    const args = ["api"];
+    if (body !== undefined) args.push("--data", JSON.stringify(body));
+    args.push(method, path);
+
+    const response = await run(args, { timeoutMs });
+    if (response.exitCode !== 0) {
+      throw new Error(`OpenCode API ${method} ${path} failed (exit ${response.exitCode})`);
+    }
+    if (!response.stdout?.trim()) return undefined;
+
+    try {
+      return JSON.parse(response.stdout);
+    } catch {
+      throw new Error(`OpenCode API ${method} ${path} returned invalid JSON`);
+    }
+  }
+
+  async function listModels() {
+    const payload = await request("GET", "/api/model");
+    if (!Array.isArray(payload?.data)) {
+      throw new Error("OpenCode model catalog response has no data array");
+    }
+    return payload.data;
+  }
+
+  async function start({ cwd, target, model, agent, prompt }) {
+    const createBody = {
+      model: modelReference(model),
+      location: { directory: cwd },
+      title: `Miwarang: ${target}`,
+    };
+    if (agent) createBody.agent = agent;
+
+    const sessionResponse = await request("POST", "/api/session", createBody);
+    const sessionId = sessionResponse?.data?.id ?? sessionResponse?.id;
+    if (typeof sessionId !== "string" || !sessionId) {
+      throw new Error("OpenCode session creation returned no session ID");
+    }
+
+    await request(
+      "POST",
+      `/api/session/${encodeURIComponent(sessionId)}/prompt`,
+      { text: prompt },
+    );
+
+    return { sessionId, state: "running" };
+  }
+
+  async function wait(sessionId) {
+    await request(
+      "POST",
+      `/api/experimental/session/${encodeURIComponent(sessionId)}/wait`,
+    );
+    const response = await request(
+      "GET",
+      `/api/session/${encodeURIComponent(sessionId)}/message`,
+    );
+    const messages = response?.data;
+    if (!Array.isArray(messages)) {
+      throw new Error(`OpenCode session ${sessionId} returned no messages`);
+    }
+    const finalMessage = [...messages]
+      .reverse()
+      .find((message) => (message.info?.role ?? message.role ?? message.type) === "assistant");
+    const text = messageText(finalMessage);
+    if (!text) {
+      throw new Error(`OpenCode session ${sessionId} returned no assistant text`);
+    }
+    return { sessionId, text };
+  }
+
+  async function runForeground(input) {
+    const run = await start(input);
+    return wait(run.sessionId);
+  }
+
+  async function cancel(sessionId) {
+    const response = await request(
+      "POST",
+      `/api/session/${encodeURIComponent(sessionId)}/interrupt`,
+    );
+    return {
+      sessionId,
+      interrupted: response?.interrupted === true,
+    };
+  }
+
+  return { listModels, start, wait, runForeground, cancel };
+}
+
+function modelReference(modelId) {
+  const slash = modelId.indexOf("/");
+  if (slash < 1 || slash === modelId.length - 1) {
+    throw new Error(`Model must use provider/model format: ${modelId}`);
+  }
+  return {
+    providerID: modelId.slice(0, slash),
+    id: modelId.slice(slash + 1),
+  };
+}
+
+function messageText(message) {
+  if (!message) return "";
+  const parts = message.parts ?? message.content ?? message.text ?? [];
+  if (typeof parts === "string") return parts;
+  return parts
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+}
+
+async function runOpenCodeCli(command, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  try {
+    const { stdout, stderr } = await execFile(command, args, {
+      encoding: "utf8",
+      maxBuffer: MAX_OUTPUT_BYTES,
+      timeout: timeoutMs,
+    });
+    return { stdout, stderr, exitCode: 0 };
+  } catch (error) {
+    const code = Number.isInteger(error.code) ? error.code : 1;
+    return { stdout: error.stdout ?? "", stderr: "", exitCode: code };
+  }
+}

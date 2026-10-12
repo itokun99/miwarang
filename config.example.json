@@ -1,0 +1,59 @@
+{
+  "defaultBackend": "opencode",
+  "backends": {
+    "opencode": {
+      "type": "opencode-v2",
+      "command": "opencode"
+    },
+    "opencode-cli": {
+      "type": "command",
+      "command": "opencode",
+      "args": ["run", "--model", "{{model}}"],
+      "promptInput": "argument",
+      "timeoutMs": 300000
+    }
+  },
+  "routes": {
+    "category:quick": {
+      "backend": "opencode",
+      "models": [
+        "opencode/space-bunny-free",
+        "opencode-go/longcat-2.5-preview-free"
+      ],
+      "freeOnly": true
+    },
+    "category:unspecified-low": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/space-bunny-free"
+      ],
+      "freeOnly": true
+    },
+    "category:deep-low": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/step-5-preview-free",
+        "opencode-go/longcat-2.5-preview-free"
+      ],
+      "freeOnly": true
+    },
+    "agent:explore": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/space-bunny-free"
+      ],
+      "freeOnly": true
+    },
+    "agent:librarian": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/space-bunny-free"
+      ],
+      "freeOnly": true
+    }
+  },
+  "runsDirectory": "~/.local/state/miwarang/runs"
+}
