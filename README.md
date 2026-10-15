@@ -90,6 +90,10 @@ Command arguments are executed as an argv array without a shell. Supported place
 
 Command-run metadata is stored under `~/.local/state/miwarang/runs` by default, or under `runsDirectory` in the config. Prompts and environment variables are not saved in run records.
 
+## License
+
+Miwarang Senpi Delegate is distributed under the MIT License. See [LICENSE](LICENSE).
+
 ## Development
 
 ```sh
