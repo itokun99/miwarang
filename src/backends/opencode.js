@@ -71,10 +71,16 @@ export function createOpenCodeBackend({
     if (!Array.isArray(messages)) {
       throw new Error(`OpenCode session ${sessionId} returned no messages`);
     }
-    const finalMessage = [...messages]
+    const isAssistant = (message) =>
+      (message.info?.role ?? message.role ?? message.type) === "assistant";
+    const completedAt = (message) => message.time?.completed ?? message.time?.created ?? 0;
+    // Messages arrive newest-first; pick the newest assistant step that has text.
+    const withText = [...messages]
+      .filter(isAssistant)
+      .sort((a, b) => completedAt(a) - completedAt(b))
       .reverse()
-      .find((message) => (message.info?.role ?? message.role ?? message.type) === "assistant");
-    const text = messageText(finalMessage);
+      .find((message) => messageText(message).length > 0);
+    const text = withText ? messageText(withText) : "";
     if (!text) {
       throw new Error(`OpenCode session ${sessionId} returned no assistant text`);
     }
@@ -122,7 +128,7 @@ function messageText(message) {
     .trim();
 }
 
-async function runOpenCodeCli(command, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function runOpenCodeCli(command, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   try {
     const { stdout, stderr } = await execFile(command, args, {
       encoding: "utf8",
@@ -131,7 +137,13 @@ async function runOpenCodeCli(command, args, { timeoutMs = DEFAULT_TIMEOUT_MS } 
     });
     return { stdout, stderr, exitCode: 0 };
   } catch (error) {
-    const code = Number.isInteger(error.code) ? error.code : 1;
-    return { stdout: error.stdout ?? "", stderr: "", exitCode: code };
+    const timedOut = error.killed === true || error.signal != null;
+    const code = Number.isInteger(error.code) ? error.code : timedOut ? 124 : 1;
+    return {
+      stdout: error.stdout ?? "",
+      stderr:
+        String(error.stderr ?? "") || (timedOut ? `killed by ${error.signal ?? "timeout"}` : ""),
+      exitCode: code,
+    };
   }
 }

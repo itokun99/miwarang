@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createOpenCodeBackend } from "../src/backends/opencode.js";
+import { createOpenCodeBackend, runOpenCodeCli } from "../src/backends/opencode.js";
 
 function jsonResponse(value) {
   return { stdout: JSON.stringify(value), stderr: "", exitCode: 0 };
@@ -20,17 +20,28 @@ function makeBackend(responses) {
 }
 
 const session = { data: { id: "ses_test123", title: "Delegated work" } };
+// Live payload shape: `data` arrives newest-first, roles live in `type`, parts in
+// `content`, and message order is tracked with `time.completed`.
 const assistantMessages = {
   data: [
+    { id: "msg_idle", type: "idle", time: { created: 4 } },
+    {
+      id: "msg_assistant_final",
+      type: "assistant",
+      time: { created: 3, streamed: 3, completed: 4 },
+      content: [{ type: "text", text: "The project has three modules." }],
+    },
+    {
+      id: "msg_assistant_opening",
+      type: "assistant",
+      time: { created: 1, streamed: 2, completed: 2 },
+      content: [{ type: "text", text: "I'll start by reading the key files in parallel." }],
+    },
     {
       id: "msg_user",
       type: "user",
-      text: "Inspect this project",
-    },
-    {
-      id: "msg_assistant",
-      type: "assistant",
-      content: [{ type: "text", text: "The project has three modules." }],
+      time: { created: 0 },
+      content: [{ type: "text", text: "Inspect this project" }],
     },
   ],
 };
@@ -143,6 +154,107 @@ describe("OpenCode v2 backend", () => {
       "GET",
       "/api/session/ses_test123/message",
     ]);
+  });
+
+  test("wait skips assistant steps without text and returns the newest one with text", async () => {
+    const { backend } = makeBackend([
+      { stdout: "", stderr: "", exitCode: 0 },
+      jsonResponse({
+        data: [
+          { id: "msg_idle", type: "idle", time: { created: 4 } },
+          {
+            id: "msg_assistant_tools",
+            type: "assistant",
+            time: { created: 3, completed: 4 },
+            content: [{ type: "reasoning", text: "Checking the module graph." }],
+          },
+          {
+            id: "msg_assistant_text",
+            type: "assistant",
+            time: { created: 1, streamed: 2, completed: 3 },
+            content: [{ type: "text", text: "Intermediate report." }],
+          },
+        ],
+      }),
+    ]);
+
+    await expect(backend.wait("ses_test123")).resolves.toEqual({
+      sessionId: "ses_test123",
+      text: "Intermediate report.",
+    });
+  });
+
+  test("wait does not fail when older assistant steps carry no text", async () => {
+    const { backend } = makeBackend([
+      { stdout: "", stderr: "", exitCode: 0 },
+      jsonResponse({
+        data: [
+          { id: "msg_idle", type: "idle", time: { created: 4 } },
+          {
+            id: "msg_assistant_final",
+            type: "assistant",
+            time: { created: 3, streamed: 3, completed: 4 },
+            content: [{ type: "text", text: "Final report." }],
+          },
+          {
+            id: "msg_assistant_tools",
+            type: "assistant",
+            time: { created: 1, completed: 2 },
+            content: [{ type: "reasoning", text: "Checking the module graph." }],
+          },
+        ],
+      }),
+    ]);
+
+    await expect(backend.wait("ses_test123")).resolves.toEqual({
+      sessionId: "ses_test123",
+      text: "Final report.",
+    });
+  });
+
+  test("wait fails when no assistant step has text", async () => {
+    const { backend } = makeBackend([
+      { stdout: "", stderr: "", exitCode: 0 },
+      jsonResponse({
+        data: [
+          { id: "msg_idle", type: "idle", time: { created: 2 } },
+          {
+            id: "msg_assistant_tools",
+            type: "assistant",
+            time: { created: 1, completed: 2 },
+            content: [{ type: "reasoning", text: "Checking the module graph." }],
+          },
+        ],
+      }),
+    ]);
+
+    await expect(backend.wait("ses_test123")).rejects.toThrow(
+      "OpenCode session ses_test123 returned no assistant text",
+    );
+  });
+
+  test("reports a timed-out CLI run as exit 124 and keeps stderr", async () => {
+    const result = await runOpenCodeCli("sh", ["-c", "printf 'boom' >&2; exec sleep 5"], {
+      timeoutMs: 50,
+    });
+
+    expect(result).toEqual({ stdout: "", stderr: "boom", exitCode: 124 });
+  });
+
+  test("keeps the real exit code and stderr of a failing CLI run", async () => {
+    const result = await runOpenCodeCli("sh", ["-c", "printf 'nope' >&2; exit 7"]);
+
+    expect(result).toEqual({ stdout: "", stderr: "nope", exitCode: 7 });
+  });
+
+  test("surfaces a timed-out backend request as exit 124", async () => {
+    const backend = createOpenCodeBackend({
+      run: () => runOpenCodeCli("sh", ["-c", "exec sleep 5"], { timeoutMs: 50 }),
+    });
+
+    await expect(backend.listModels()).rejects.toThrow(
+      "OpenCode API GET /api/model failed (exit 124)",
+    );
   });
 
   test("interrupts background work by OpenCode session ID", async () => {
