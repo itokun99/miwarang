@@ -5,4 +5,4 @@ coverage/
 .env.*
 !.env.example
 docs/superpowers/plans/
-.omo/evidence/
+.omo/
