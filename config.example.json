@@ -5,12 +5,12 @@
       "type": "opencode-v2",
       "command": "opencode"
     },
-    "opencode-cli": {
+    "commandcode": {
       "type": "command",
-      "command": "opencode",
-      "args": ["run", "--model", "{{model}}"],
+      "command": "commandcode",
+      "args": ["-p", "--model", "{{model}}", "--no-session", "--yolo", "-t"],
       "promptInput": "argument",
-      "timeoutMs": 300000
+      "timeoutMs": 900000
     }
   },
   "routes": {
@@ -18,7 +18,7 @@
       "backend": "opencode",
       "models": [
         "opencode/space-bunny-free",
-        "opencode-go/longcat-2.5-preview-free"
+        "opencode/mimo-v2.6-flash-free"
       ],
       "freeOnly": true
     },
@@ -26,17 +26,76 @@
       "backend": "opencode",
       "models": [
         "opencode-go/longcat-2.5-preview-free",
-        "opencode/space-bunny-free"
+        "opencode/longcat-2.5-preview-free"
       ],
       "freeOnly": true
     },
     "category:deep-low": {
       "backend": "opencode",
       "models": [
-        "opencode-go/step-5-preview-free",
-        "opencode-go/longcat-2.5-preview-free"
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/nemotron-3.5-super-vl-free"
       ],
       "freeOnly": true
+    },
+    "category:unspecified-high": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/nemotron-3.5-lightning-free"
+      ],
+      "freeOnly": true
+    },
+    "category:writing": {
+      "backend": "commandcode",
+      "models": [
+        "qwen/qwen3.8-max",
+        "moonshotai/kimi-k3"
+      ]
+    },
+    "category:artistry": {
+      "backend": "opencode",
+      "models": [
+        "opencode/space-bunny-free",
+        "opencode/glm-5.3-flash-free"
+      ],
+      "freeOnly": true
+    },
+    "category:architect": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/nemotron-3.5-lightning-free"
+      ],
+      "freeOnly": true
+    },
+    "category:visual-engineering": {
+      "backend": "opencode",
+      "models": [
+        "opencode/nemotron-3.5-super-vl-free",
+        "opencode/mimo-v2.6-flash-free"
+      ],
+      "freeOnly": true
+    },
+    "category:ultrabrain": {
+      "backend": "opencode",
+      "models": [
+        "opencode/nemotron-3-ultra-free",
+        "opencode/deepseek-v4.1-flash-free",
+        "opencode/big-pickle"
+      ],
+      "freeOnly": true,
+      "blockNativeTask": false
+    },
+    "category:deep-high": {
+      "backend": "opencode",
+      "models": [
+        "opencode/deepseek-v4.1-flash-free",
+        "opencode/nemotron-3-ultra-free",
+        "opencode/big-pickle"
+      ],
+      "freeOnly": true,
+      "blockNativeTask": false
     },
     "agent:explore": {
       "backend": "opencode",
@@ -53,7 +112,61 @@
         "opencode/space-bunny-free"
       ],
       "freeOnly": true
+    },
+    "agent:plan-consultant": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/nemotron-3.5-lightning-free"
+      ],
+      "freeOnly": true
+    },
+    "agent:plan-reviewer": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/nemotron-3.5-lightning-free"
+      ],
+      "freeOnly": true
+    },
+    "agent:omo-native-code-reviewer": {
+      "backend": "commandcode",
+      "models": [
+        "qwen/qwen3.8-max",
+        "moonshotai/kimi-k3"
+      ]
+    },
+    "agent:omo-native-gate-reviewer": {
+      "backend": "commandcode",
+      "models": [
+        "qwen/qwen3.8-max",
+        "moonshotai/kimi-k3"
+      ]
+    },
+    "agent:omo-native-qa-executor": {
+      "backend": "commandcode",
+      "models": [
+        "qwen/qwen3.8-max",
+        "moonshotai/kimi-k3"
+      ]
+    },
+    "category:*": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/beam-free",
+        "opencode-go/longcat-2.5-preview-free"
+      ],
+      "freeOnly": true
     }
   },
+  "defaultRoute": {
+    "backend": "opencode",
+    "models": [
+      "opencode-go/longcat-2.5-preview-free",
+      "opencode/space-bunny-free"
+    ],
+    "freeOnly": true
+  },
+  "blockNativeTask": "all",
   "runsDirectory": "~/.local/state/miwarang/runs"
 }
