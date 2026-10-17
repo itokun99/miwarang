@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, resolveRoute } from "./config.js";
+import { loadConfig, resolveRoute, resolveTargetRoute } from "./config.js";
 import { createCommandBackend } from "./backends/command.js";
 import { createOpenCodeBackend } from "./backends/opencode.js";
 import { RunStore } from "./runs/store.js";
@@ -24,7 +24,15 @@ export function setupExtension(pi, { config, backends: injectedBackends } = {}) 
     promptSnippet:
       "Delegate eligible OMO category and agent tasks through the configured Miwarang backend.",
     promptGuidelines: [
-      "Use miwarang_delegate instead of native task for these exact targets: category:quick, category:unspecified-low, category:deep-low, agent:explore, and agent:librarian. Pass the full target prefix, preserve the task prompt, and map run_in_background to mode background.",
+      "Use miwarang_delegate instead of native task for these targets: " +
+        "category:quick, category:unspecified-low, category:unspecified-high, " +
+        "category:deep-low, category:deep-high, category:ultrabrain, category:artistry, " +
+        "category:architect, category:writing, and category:visual-engineering, plus " +
+        "agent:explore, agent:librarian, agent:plan-consultant, agent:plan-reviewer, " +
+        "agent:omo-native-code-reviewer, agent:omo-native-gate-reviewer, and " +
+        "agent:omo-native-qa-executor. Routes resolve exact key first, then the " +
+        "category:* or agent:* wildcard, then defaultRoute. Pass the full target " +
+        "prefix, preserve the task prompt, and map run_in_background to mode background.",
       "Use miwarang_wait or miwarang_cancel with the returned session or run ID for background work.",
     ],
     parameters: Type.Object({
@@ -38,32 +46,27 @@ export function setupExtension(pi, { config, backends: injectedBackends } = {}) 
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const target = normalizeTarget(params.target);
-      const configuredRoute = config.routes?.[target];
-      if (!configuredRoute) throw new Error(`No route configured for ${target}`);
-
-      const backendId = params.backend ?? configuredRoute.backend;
-      const backendConfig = config.backends?.[backendId];
+      if (params.backend !== undefined && !config.backends?.[params.backend]) {
+        throw new Error(`Backend ${params.backend} is not configured`);
+      }
+      const resolved = resolveTargetRoute(config, target, { backend: params.backend });
+      const backendId = resolved.backendName;
       const backend = backends[backendId];
-      if (!backendConfig || !backend) throw new Error(`Backend ${backendId} is not configured`);
+      if (!backend) throw new Error(`Backend ${backendId} is not configured`);
 
-      const routeConfig =
-        backendId === configuredRoute.backend
-          ? config
-          : {
-              ...config,
-              routes: {
-                ...config.routes,
-                [target]: { ...configuredRoute, backend: backendId },
-              },
-            };
       const liveModels =
-        backendConfig.type === "opencode-v2"
+        resolved.backend.type === "opencode-v2"
           ? await backend.listModels()
-          : configuredCommandModels(configuredRoute, params.model);
-      const route = resolveRoute(routeConfig, target, liveModels, {
-        model: params.model,
-        agent: params.agent,
-      });
+          : configuredCommandModels(resolved, params.model);
+      const route = resolveRoute(
+        {
+          ...config,
+          routes: { ...config.routes, [target]: modelSelectionRoute(resolved) },
+        },
+        target,
+        liveModels,
+        { model: params.model, agent: params.agent },
+      );
       const request = {
         cwd: params.cwd ?? ctx?.cwd ?? pi.cwd ?? process.cwd(),
         target,
@@ -76,17 +79,30 @@ export function setupExtension(pi, { config, backends: injectedBackends } = {}) 
         mode === "background"
           ? await backend.start(request)
           : await backend.runForeground(request);
+      const resolvedViaValue = resolvedVia(resolved.key, target);
 
       if (mode === "background") {
         const id = result.sessionId ?? result.runId;
         return {
           content: [{ type: "text", text: `Started ${target} in background (${id}).` }],
-          details: { ...result, backend: backendId },
+          details: {
+            ...result,
+            backend: backendId,
+            resolvedVia: resolvedViaValue,
+            model: route.model,
+            target,
+          },
         };
       }
       return {
         content: [{ type: "text", text: result.text }],
-        details: { sessionId: result.sessionId, backend: backendId },
+        details: {
+          sessionId: result.sessionId,
+          backend: backendId,
+          resolvedVia: resolvedViaValue,
+          model: route.model,
+          target,
+        },
       };
     },
   });
@@ -171,6 +187,21 @@ function createBackends(config) {
     }
   }
   return backends;
+}
+
+function modelSelectionRoute(resolved) {
+  return {
+    backend: resolved.backendName,
+    models: resolved.models,
+    freeOnly: resolved.freeOnly,
+    agent: resolved.agent,
+  };
+}
+
+function resolvedVia(key, target) {
+  if (key === "defaultRoute") return "default";
+  if (key === target) return "exact";
+  return "wildcard";
 }
 
 function configuredCommandModels(route, modelOverride) {

@@ -31,9 +31,27 @@ const liveModels = [
     id: "longcat-2.5-preview-free",
     cost: { input: 0, output: 0 },
   },
+  {
+    providerID: "qwen",
+    id: "qwen3.8-max",
+    cost: { input: 0, output: 0 },
+  },
 ];
 
-function makeHarness() {
+const wildcardConfig = {
+  backends: {
+    opencode: { type: "opencode-v2", command: "opencode" },
+    commandcode: { type: "command", command: "commandcode" },
+  },
+  routes: {
+    "category:*": {
+      backend: "opencode",
+      models: ["qwen/qwen3.8-max"],
+    },
+  },
+};
+
+function makeHarness({ config: activeConfig = config } = {}) {
   const tools = new Map();
   const handlers = new Map();
   const calls = [];
@@ -56,6 +74,25 @@ function makeHarness() {
       return { sessionId, interrupted: true };
     },
   };
+  const commandBackend = {
+    listModels: async () => liveModels,
+    runForeground: async (request) => {
+      calls.push(["foreground", request]);
+      return { sessionId: "ses_command_foreground", text: "Command foreground result" };
+    },
+    start: async (request) => {
+      calls.push(["start", request]);
+      return { sessionId: "ses_command_background", state: "running" };
+    },
+    wait: async (sessionId) => {
+      calls.push(["wait", sessionId]);
+      return { sessionId, text: "Command background result" };
+    },
+    cancel: async (sessionId) => {
+      calls.push(["cancel", sessionId]);
+      return { sessionId, interrupted: true };
+    },
+  };
   const pi = {
     cwd: "/workspace",
     registerTool(tool) {
@@ -69,11 +106,11 @@ function makeHarness() {
   };
 
   setupExtension(pi, {
-    config,
-    backends: { opencode: backend },
+    config: activeConfig,
+    backends: { opencode: backend, commandcode: commandBackend },
   });
 
-  return { tools, handlers, calls };
+  return { tools, handlers, calls, backend, commandBackend };
 }
 
 async function invoke(tool, params) {
@@ -90,9 +127,11 @@ describe("Senpi extension", () => {
       "miwarang_cancel",
     ]);
     const guidance = tools.get("miwarang_delegate").promptGuidelines.join(" ");
-    expect(guidance).toMatch(/quick.*unspecified-low.*deep-low.*explore.*librarian/i);
-    expect(guidance).toContain("category:quick");
-    expect(guidance).toContain("agent:librarian");
+    expect(guidance).toMatch(
+      /category:quick.*category:visual-engineering.*agent:explore.*agent:omo-native-qa-executor/i,
+    );
+    expect(guidance).toContain("category:*");
+    expect(guidance).toContain("defaultRoute");
   });
 
   test("dispatches foreground work to the configured backend and model", async () => {
@@ -113,7 +152,12 @@ describe("Senpi extension", () => {
         prompt: "Inspect this project",
       },
     ]);
-    expect(result.details).toMatchObject({ sessionId: "ses_foreground" });
+    expect(result.details).toMatchObject({
+      sessionId: "ses_foreground",
+      backend: "opencode",
+      resolvedVia: "exact",
+      model: "opencode/space-bunny-free",
+    });
     expect(result.content[0].text).toContain("Foreground result");
   });
 
@@ -133,7 +177,10 @@ describe("Senpi extension", () => {
       model: "opencode-go/longcat-2.5-preview-free",
       agent: "explore",
     });
-    expect(result.details).toMatchObject({ sessionId: "ses_background" });
+    expect(result.details).toMatchObject({
+      sessionId: "ses_background",
+      resolvedVia: "exact",
+    });
   });
 
   test("waits for and cancels a background session by ID", async () => {
@@ -177,5 +224,102 @@ describe("Senpi extension", () => {
     expect(redirected).toMatchObject({ block: true });
     expect(redirected.reason).toContain("miwarang_delegate");
     expect(unchanged).toBeUndefined();
+  });
+
+  test("delegates a wildcard target and reports resolvedVia wildcard", async () => {
+    const { tools, calls } = makeHarness({ config: wildcardConfig });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:writing",
+      prompt: "Write the docs",
+      mode: "foreground",
+    });
+
+    expect(calls[0][1]).toMatchObject({
+      cwd: "/workspace",
+      target: "category:writing",
+      model: "qwen/qwen3.8-max",
+    });
+    expect(result.details).toMatchObject({
+      sessionId: "ses_foreground",
+      backend: "opencode",
+      resolvedVia: "wildcard",
+      model: "qwen/qwen3.8-max",
+      target: "category:writing",
+    });
+  });
+
+  test("override to a command backend uses the wildcard route models", async () => {
+    const { tools, calls } = makeHarness({ config: wildcardConfig });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:writing",
+      prompt: "Write the docs",
+      mode: "foreground",
+      backend: "commandcode",
+    });
+
+    expect(calls[0][1]).toMatchObject({
+      cwd: "/workspace",
+      target: "category:writing",
+      model: "qwen/qwen3.8-max",
+    });
+    expect(result.details).toMatchObject({
+      sessionId: "ses_command_foreground",
+      backend: "commandcode",
+      resolvedVia: "wildcard",
+      model: "qwen/qwen3.8-max",
+    });
+  });
+
+  test("reports resolvedVia default for a target that only matches defaultRoute", async () => {
+    const withDefault = {
+      backends: { opencode: { type: "opencode-v2", command: "opencode" } },
+      routes: {
+        "category:quick": { backend: "opencode", models: ["opencode/space-bunny-free"] },
+      },
+      defaultRoute: { backend: "opencode", models: ["opencode/space-bunny-free"] },
+    };
+    const { tools } = makeHarness({ config: withDefault });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:brand-new",
+      prompt: "Hello",
+      mode: "foreground",
+    });
+
+    expect(result.details).toMatchObject({
+      backend: "opencode",
+      resolvedVia: "default",
+      model: "opencode/space-bunny-free",
+      target: "category:brand-new",
+    });
+  });
+
+  test("rejects an override to an unknown backend with the configured error", async () => {
+    const { tools } = makeHarness({ config: wildcardConfig });
+
+    await expect(
+      invoke(tools.get("miwarang_delegate"), {
+        target: "category:writing",
+        prompt: "Write the docs",
+        backend: "nope",
+      }),
+    ).rejects.toThrow("Backend nope is not configured");
+  });
+
+  test("fails closed for an unconfigured target with no wildcard or default", async () => {
+    const bare = {
+      backends: { opencode: { type: "opencode-v2", command: "opencode" } },
+      routes: {},
+    };
+    const { tools } = makeHarness({ config: bare });
+
+    await expect(
+      invoke(tools.get("miwarang_delegate"), {
+        target: "category:unknown",
+        prompt: "Do the thing",
+      }),
+    ).rejects.toThrow("No route configured for category:unknown");
   });
 });
