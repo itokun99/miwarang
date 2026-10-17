@@ -190,11 +190,24 @@ function createBackends(config, store = new RunStore({ directory: config.runsDir
   return backends;
 }
 
+// Effective price policy: the route-level value wins over the backend-level
+// one; both default to "any".
+function effectivePricePolicy(route) {
+  return route.pricePolicy ?? route.backend?.pricePolicy ?? "any";
+}
+
+// The route handed to resolveRoute. A command backend has no live catalog, so
+// when the effective pricePolicy is "any" the freeOnly constraint cannot be
+// enforced there; dropping it lets the command candidates through. opencode-v2
+// keeps its catalog-backed freeOnly gate unchanged.
 function modelSelectionRoute(resolved) {
+  const pricePolicy = effectivePricePolicy(resolved);
+  const commandBackend = resolved.backend?.type === "command";
+  const freeOnly = resolved.freeOnly && !(commandBackend && pricePolicy === "any");
   return {
     backend: resolved.backendName,
     models: resolved.models,
-    freeOnly: resolved.freeOnly,
+    freeOnly,
     agent: resolved.agent,
   };
 }
@@ -205,9 +218,13 @@ function resolvedVia(key, target) {
   return "wildcard";
 }
 
-function configuredCommandModels(route, modelOverride) {
+// Command backends have no live model catalog, so a freeOnly route only
+// reaches one when the effective pricePolicy allows any model. The route-level
+// pricePolicy wins over the backend-level one; both default to "any".
+export function configuredCommandModels(route, modelOverride) {
   const ids = modelOverride ? [modelOverride] : route.models;
-  if (route.freeOnly) {
+  const pricePolicy = effectivePricePolicy(route);
+  if (route.freeOnly && pricePolicy === "freeOnly") {
     throw new Error("freeOnly routes require a backend with a live model catalog");
   }
   return ids.map((id) => {

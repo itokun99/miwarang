@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { backendForRun, setupExtension } from "../src/extension.js";
+import { backendForRun, configuredCommandModels, setupExtension } from "../src/extension.js";
+import { resolveTargetRoute } from "../src/config.js";
 
 const config = {
   backends: {
@@ -790,5 +791,187 @@ describe("run backend resolution (run store)", () => {
     const store = fakeRunStore({ run_A: { id: "run_A", backend: "ghost" } });
 
     expect(await backendForRun(multiCommandConfig, "run_A", undefined, store)).toBe("command");
+  });
+});
+
+// GAP-3: a freeOnly route may target a command backend when the effective
+// pricePolicy ("any"|"freeOnly", default "any") allows it. The route-level
+// policy wins over the backend-level one.
+describe("command backend pricePolicy", () => {
+  const commandBackends = {
+    commandcode: { type: "command", command: "commandcode" },
+  };
+
+  const CATALOG_ERROR = "freeOnly routes require a backend with a live model catalog";
+
+  function resolvedRoute(routeOverrides = {}, backends = commandBackends) {
+    const route = {
+      backend: "commandcode",
+      models: ["qwen/qwen3.8-max", "moonshotai/kimi-k3"],
+      freeOnly: true,
+      ...routeOverrides,
+    };
+    return resolveTargetRoute(
+      { backends, routes: { "category:writing": route } },
+      "category:writing",
+    );
+  }
+
+  test("a freeOnly route does not throw when the route pricePolicy is any", () => {
+    const models = configuredCommandModels(resolvedRoute({ pricePolicy: "any" }));
+
+    expect(models).toEqual([
+      { providerID: "qwen", id: "qwen3.8-max", cost: { input: 1, output: 1 } },
+      { providerID: "moonshotai", id: "kimi-k3", cost: { input: 1, output: 1 } },
+    ]);
+  });
+
+  test("a freeOnly route throws the catalog error when the route pricePolicy is freeOnly", () => {
+    expect(() => configuredCommandModels(resolvedRoute({ pricePolicy: "freeOnly" }))).toThrow(
+      CATALOG_ERROR,
+    );
+  });
+
+  test("a freeOnly route defaults to any and does not throw", () => {
+    expect(() => configuredCommandModels(resolvedRoute())).not.toThrow();
+  });
+
+  test("a model override on a freeOnly route with pricePolicy any resolves", () => {
+    const models = configuredCommandModels(resolvedRoute({ pricePolicy: "any" }), "qwen/qwen3.8-max");
+
+    expect(models).toEqual([
+      { providerID: "qwen", id: "qwen3.8-max", cost: { input: 1, output: 1 } },
+    ]);
+  });
+
+  test("backend pricePolicy freeOnly makes a freeOnly route throw", () => {
+    const backends = {
+      commandcode: { type: "command", command: "commandcode", pricePolicy: "freeOnly" },
+    };
+
+    expect(() => configuredCommandModels(resolvedRoute({}, backends))).toThrow(CATALOG_ERROR);
+  });
+
+  test("backend pricePolicy any lets a freeOnly route pass", () => {
+    const backends = {
+      commandcode: { type: "command", command: "commandcode", pricePolicy: "any" },
+    };
+
+    expect(() => configuredCommandModels(resolvedRoute({}, backends))).not.toThrow();
+  });
+
+  test("route pricePolicy any overrides backend pricePolicy freeOnly", () => {
+    const backends = {
+      commandcode: { type: "command", command: "commandcode", pricePolicy: "freeOnly" },
+    };
+
+    expect(() =>
+      configuredCommandModels(resolvedRoute({ pricePolicy: "any" }, backends)),
+    ).not.toThrow();
+  });
+
+  test("route pricePolicy freeOnly overrides backend pricePolicy any", () => {
+    const backends = {
+      commandcode: { type: "command", command: "commandcode", pricePolicy: "any" },
+    };
+
+    expect(() =>
+      configuredCommandModels(resolvedRoute({ pricePolicy: "freeOnly" }, backends)),
+    ).toThrow(CATALOG_ERROR);
+  });
+
+  test("a non-freeOnly route never throws, even with pricePolicy freeOnly", () => {
+    expect(() =>
+      configuredCommandModels(resolvedRoute({ freeOnly: false, pricePolicy: "freeOnly" })),
+    ).not.toThrow();
+  });
+
+  test("the delegate surfaces the catalog error for a freeOnly command route with pricePolicy freeOnly", async () => {
+    const activeConfig = {
+      backends: { commandcode: { type: "command", command: "commandcode" } },
+      routes: {
+        "category:writing": {
+          backend: "commandcode",
+          models: ["qwen/qwen3.8-max"],
+          freeOnly: true,
+          pricePolicy: "freeOnly",
+        },
+      },
+    };
+    const { tools } = makeHarness({ config: activeConfig });
+
+    await expect(
+      invoke(tools.get("miwarang_delegate"), {
+        target: "category:writing",
+        prompt: "Write the docs",
+      }),
+    ).rejects.toThrow(CATALOG_ERROR);
+  });
+
+  test("a freeOnly route with pricePolicy any delegates successfully to a command backend", async () => {
+    const activeConfig = {
+      backends: { commandcode: { type: "command", command: "commandcode" } },
+      routes: {
+        "category:writing": {
+          backend: "commandcode",
+          models: ["qwen/qwen3.8-max", "moonshotai/kimi-k3"],
+          freeOnly: true,
+          pricePolicy: "any",
+        },
+      },
+    };
+    const { tools, calls } = makeHarness({ config: activeConfig });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:writing",
+      prompt: "Write the docs",
+      mode: "foreground",
+    });
+
+    expect(calls[0][1]).toMatchObject({
+      target: "category:writing",
+      model: "qwen/qwen3.8-max",
+    });
+    expect(result.details).toMatchObject({
+      backend: "commandcode",
+      resolvedVia: "exact",
+      model: "qwen/qwen3.8-max",
+    });
+    expect(result.content[0].text).toContain("Command foreground result");
+  });
+
+  test("pricePolicy any does not bypass the live-catalog gate for opencode-v2", async () => {
+    const paidCatalog = [
+      { providerID: "opencode", id: "claude-sonnet-5", cost: { input: 3, output: 15 } },
+    ];
+    const opencodeBackend = {
+      listModels: async () => paidCatalog,
+      runForeground: async () => ({ sessionId: "ses_should_not_run", text: "should not run" }),
+      start: async () => ({ sessionId: "ses_should_not_run", state: "running" }),
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const activeConfig = {
+      backends: { opencode: { type: "opencode-v2", command: "opencode" } },
+      routes: {
+        "category:quick": {
+          backend: "opencode",
+          models: ["opencode/claude-sonnet-5"],
+          freeOnly: true,
+          pricePolicy: "any",
+        },
+      },
+    };
+    const { tools } = makeHarness({
+      config: activeConfig,
+      backends: { opencode: opencodeBackend },
+    });
+
+    await expect(
+      invoke(tools.get("miwarang_delegate"), {
+        target: "category:quick",
+        prompt: "Do the thing",
+      }),
+    ).rejects.toThrow(/free/i);
   });
 });
