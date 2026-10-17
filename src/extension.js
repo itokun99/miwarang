@@ -13,8 +13,9 @@ export default async function miwarangExtension(pi) {
   setupExtension(pi, { config });
 }
 
-export function setupExtension(pi, { config, backends: injectedBackends } = {}) {
-  const backends = injectedBackends ?? createBackends(config);
+export function setupExtension(pi, { config, backends: injectedBackends, runStore } = {}) {
+  const store = runStore ?? new RunStore({ directory: config.runsDirectory });
+  const backends = injectedBackends ?? createBackends(config, store);
 
   pi.registerTool({
     name: "miwarang_delegate",
@@ -123,7 +124,7 @@ export function setupExtension(pi, { config, backends: injectedBackends } = {}) 
     ]),
     async execute(_toolCallId, params) {
       const id = delegatedId(params);
-      const backendId = backendForRun(config, id, params.backend);
+      const backendId = await backendForRun(config, id, params.backend, store);
       const result = await backends[backendId].wait(id);
       return {
         content: [{ type: "text", text: result.text || `Task state: ${result.state}.` }],
@@ -148,7 +149,7 @@ export function setupExtension(pi, { config, backends: injectedBackends } = {}) 
     ]),
     async execute(_toolCallId, params) {
       const id = delegatedId(params);
-      const backendId = backendForRun(config, id, params.backend);
+      const backendId = await backendForRun(config, id, params.backend, store);
       const result = await backends[backendId].cancel(id);
       return {
         content: [{ type: "text", text: `Cancellation state: ${result.state ?? result.interrupted}.` }],
@@ -175,9 +176,8 @@ export function setupExtension(pi, { config, backends: injectedBackends } = {}) 
   });
 }
 
-function createBackends(config) {
+function createBackends(config, store = new RunStore({ directory: config.runsDirectory })) {
   const backends = {};
-  const store = new RunStore({ directory: config.runsDirectory });
   for (const [id, backend] of Object.entries(config.backends)) {
     if (backend.type === "opencode-v2") {
       backends[id] = createOpenCodeBackend({ command: backend.command });
@@ -218,10 +218,21 @@ function configuredCommandModels(route, modelOverride) {
   });
 }
 
-function backendForRun(config, runId, requestedBackend) {
+// Resolve which backend owns a delegated ID. An explicit `backend` parameter
+// wins; otherwise a `run_` ID is looked up in the run store (command backends
+// record their own id there), and only when no record is found does the legacy
+// id-prefix heuristic apply. The heuristic is deliberately unchanged so
+// pre-existing runs keep resolving.
+export async function backendForRun(config, runId, requestedBackend, store) {
   if (requestedBackend) {
     if (!config.backends[requestedBackend]) throw new Error(`Backend ${requestedBackend} is not configured`);
     return requestedBackend;
+  }
+  if (runId.startsWith("run_")) {
+    const record = store ? await store.get(runId).catch(() => undefined) : undefined;
+    if (record && typeof record.backend === "string" && config.backends[record.backend]) {
+      return record.backend;
+    }
   }
   if (runId.startsWith("ses_")) {
     const entry = Object.entries(config.backends).find(([, backend]) => backend.type === "opencode-v2");
