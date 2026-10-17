@@ -26,13 +26,16 @@ miwarang/
 ## WHERE TO LOOK
 | Task | Location | Notes |
 |------|----------|-------|
-| Add/change a delegated target | config.example.json + README "OMO routing" | keys are `category:<name>` / `agent:<name>`; only configured routes get blocked and nudged |
+| Add/change a delegated target | config.example.json + README "Multi-harness routing" | keys are `category:<name>` / `agent:<name>`; resolution: exact → `category:*`/`agent:*` wildcard → `defaultRoute` |
 | Add a backend type | src/extension.js `createBackends` + src/backends/ adapter | follow the CONTRIBUTING "Adding a backend" checklist |
 | Tool schemas / agent guidance text | src/extension.js `registerTool` blocks | asserted by test/extension.test.js |
 | Model selection, free-only policy | src/config.js `resolveRoute` | freeOnly needs a live OpenCode catalog; fails loudly, never falls back to paid |
-| Native `task` interception | `pi.on("tool_call")` in src/extension.js | blocks only targets present in `config.routes` |
+| Route resolution + `resolvedVia` | src/config.js `resolveTargetRoute` | exact → `category:*`/`agent:*` wildcard → `defaultRoute`; delegate `details.resolvedVia` is `exact`/`wildcard`/`default` |
+| Price policy | src/extension.js `effectivePricePolicy` | route `pricePolicy` ?? backend `pricePolicy` ?? `any`; command backends drop freeOnly when effective policy is `any` |
+| Block policy (`blockNativeTask`) | src/extension.js `shouldBlockNativeTask` | per-route flag overrides top-level; default `configured` blocks exact/wildcard matches; `defaultRoute` never blocks; `"all"` requires wildcard/defaultRoute |
+| Native `task` interception | `pi.on("tool_call")` in src/extension.js | blocks per `blockNativeTask` policy, not route presence alone |
 | OpenCode API surface | src/backends/opencode.js | `POST /api/session`, `/prompt`, `/interrupt`, `GET /api/model`, `POST /api/experimental/session/<id>/wait`, `GET /api/session/<id>/message` |
-| Background runs and cancellation | src/backends/command.js, src/runs/store.js | `run_<uuid>` ids; cancel kills the process group on POSIX |
+| Background runs and cancellation | src/backends/command.js, src/runs/store.js | `run_<uuid>` ids; cancel kills the process group on POSIX; `backendForRun` resolves via RunStore record |
 | Release notes | docs/releases/<version>.md | GH release body is the file verbatim |
 
 ## CODE MAP
@@ -61,6 +64,9 @@ Refs = occurrences across src+test (`grep -o`).
 - Run records: ids must match `^run_[0-9a-f-]{36}$` before any path use; directory mode 0700, files 0600; prompts and env are never persisted.
 - Timeouts: 10-minute default; timed-out CLI runs report exit 124 (curl-style) with stderr kept.
 - Tests mirror src one-to-one (`extension.test.js` ↔ `extension.js`, ...) and use fakes through the injection seams.
+- Delegate results carry `resolvedVia` (`exact` | `wildcard` | `default`) and `model` in `details`; log them when debugging route selection.
+- Effective price policy: route-level `pricePolicy` ?? backend-level `pricePolicy` ?? `any`. Command backends drop the freeOnly constraint when the effective policy is `any`; opencode-v2 keeps the catalog-backed gate.
+- `blockNativeTask` is explicit: per-route flag overrides top-level; default `configured` blocks exact and wildcard matches only (never `defaultRoute`); `"all"` fails fast at load without a wildcard route or `defaultRoute`.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 - NEVER interpolate prompts into a shell command - executable plus argv array only (CONTRIBUTING).
@@ -87,4 +93,5 @@ opencode api GET /api/model                  # live model catalog; freeOnly rout
 - The harness caches the extension module at session start: editing src/ does not change the running `miwarang_*` tools until the user runs `/reload`; prove on-disk behavior with a Bun script that imports src directly.
 - `MIWARANG_CONFIG` overrides the config path; default is `~/.config/miwarang/config.json`; a missing or invalid config fails extension load.
 - When no free model is available, delegation fails with `No available free model is configured for <target>` (catalog size plus per-candidate availability included) - by design, not a retry hint.
+- F-1 (wait/cancel mis-routed `run_` ids to the first command backend) is resolved: `backendForRun` resolves explicit param → RunStore record → legacy prefix heuristic, so wait/cancel work without a manual backend parameter.
 - Public repo (github.com/itokun99/miwarang): do not push or release unless asked; `.omo/` is deliberately untracked.
