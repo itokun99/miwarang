@@ -70,6 +70,64 @@ describe("OpenCode v2 backend", () => {
     expect(calls).toEqual([["api", "GET", "/api/model"]]);
   });
 
+  test("retries once when the model catalog is empty on the first call", async () => {
+    const fullCatalog = [
+      {
+        providerID: "opencode",
+        id: "space-bunny-free",
+        cost: { input: 0, output: 0 },
+      },
+    ];
+    const { backend, calls } = makeBackend([
+      jsonResponse({ data: [] }),
+      jsonResponse({ data: fullCatalog }),
+    ]);
+
+    expect(await backend.listModels()).toEqual(fullCatalog);
+    expect(calls).toEqual([
+      ["api", "GET", "/api/model"],
+      ["api", "GET", "/api/model"],
+    ]);
+  });
+
+  test("returns an empty catalog after a second empty response", async () => {
+    const { backend, calls } = makeBackend([
+      jsonResponse({ data: [] }),
+      jsonResponse({ data: [] }),
+    ]);
+
+    expect(await backend.listModels()).toEqual([]);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("does not retry when the first catalog response is malformed", async () => {
+    const { backend, calls } = makeBackend([
+      jsonResponse({ data: "not-an-array" }),
+    ]);
+
+    await expect(backend.listModels()).rejects.toThrow(
+      "OpenCode model catalog response has no data array",
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  test("propagates an error from the retry attempt instead of swallowing it", async () => {
+    let attempts = 0;
+    const backend = createOpenCodeBackend({
+      command: "opencode",
+      run: async () => {
+        attempts += 1;
+        if (attempts === 1) return jsonResponse({ data: [] });
+        throw new Error("OpenCode API GET /api/model failed (exit 124)");
+      },
+    });
+
+    await expect(backend.listModels()).rejects.toThrow(
+      "OpenCode API GET /api/model failed (exit 124)",
+    );
+    expect(attempts).toBe(2);
+  });
+
   test("starts background work and returns the OpenCode session ID", async () => {
     const { backend, calls } = makeBackend([
       jsonResponse(session),
