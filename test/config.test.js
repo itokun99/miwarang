@@ -339,3 +339,108 @@ describe("validateConfig", () => {
     );
   });
 });
+
+describe("v0.1.1 legacy fixture compatibility", () => {
+  // Frozen v0.1.1 config: opencode backend only, two exact routes, none of the
+  // new-style keys (no wildcard route, no defaultRoute, no blockNativeTask, no
+  // pricePolicy). Proves the merged resolver keeps legacy configs working.
+  const legacy = {
+    backends: { opencode: { type: "opencode-v2", command: "opencode" } },
+    routes: {
+      "category:quick": {
+        backend: "opencode",
+        models: ["opencode/space-bunny-free", "opencode-go/longcat-2.5-preview-free"],
+        freeOnly: true,
+      },
+      "agent:explore": {
+        backend: "opencode",
+        models: ["opencode-go/longcat-2.5-preview-free"],
+        freeOnly: true,
+        agent: "explore",
+      },
+    },
+  };
+
+  test("validateConfig accepts a v0.1.1 config with no new-style keys", () => {
+    expect(Object.keys(legacy.backends)).toEqual(["opencode"]);
+    expect(Object.keys(legacy.routes)).toEqual(["category:quick", "agent:explore"]);
+    expect(legacy.defaultRoute).toBeUndefined();
+    expect(legacy.blockNativeTask).toBeUndefined();
+    expect(legacy.pricePolicy).toBeUndefined();
+    expect(() => validateConfig(legacy)).not.toThrow();
+  });
+
+  test("resolveRoute falls through the legacy candidate list to a free model", () => {
+    const catalog = [
+      {
+        providerID: "opencode-go",
+        id: "longcat-2.5-preview-free",
+        cost: { input: 0, output: 0 },
+      },
+    ];
+
+    expect(resolveRoute(legacy, "category:quick", catalog)).toEqual({
+      backend: { type: "opencode-v2", command: "opencode" },
+      target: "category:quick",
+      model: "opencode-go/longcat-2.5-preview-free",
+      freeOnly: true,
+    });
+  });
+
+  test("resolveTargetRoute resolves legacy keys exactly and preserves the agent", () => {
+    const quick = resolveTargetRoute(legacy, "category:quick");
+    expect(quick.key).toBe("category:quick");
+    expect(quick.target).toBe("category:quick");
+    expect(quick.backend).toEqual({ type: "opencode-v2", command: "opencode" });
+    expect(quick.backendName).toBe("opencode");
+    expect(quick.models).toEqual([
+      "opencode/space-bunny-free",
+      "opencode-go/longcat-2.5-preview-free",
+    ]);
+    expect(quick.freeOnly).toBe(true);
+
+    const explore = resolveTargetRoute(legacy, "agent:explore");
+    expect(explore.key).toBe("agent:explore");
+    expect(explore.backendName).toBe("opencode");
+    expect(explore.agent).toBe("explore");
+  });
+});
+
+describe("new-style routing fail-closed and override", () => {
+  const backends = {
+    opencode: { type: "opencode-v2", command: "opencode" },
+    commandcode: { type: "command", command: "commandcode" },
+  };
+
+  test("unknown category target fails closed when only an agent:* wildcard exists", () => {
+    const config = {
+      backends,
+      routes: {
+        "agent:*": { backend: "opencode", models: ["opencode/space-bunny-free"] },
+      },
+      pricePolicy: "free-only",
+    };
+
+    expect(() => resolveTargetRoute(config, "category:unknown")).toThrow(
+      "No route configured for category:unknown",
+    );
+  });
+
+  test("wildcard route with a command override keeps the wildcard models", () => {
+    const config = {
+      backends,
+      routes: {
+        "category:quick": { backend: "opencode", models: ["opencode/space-bunny-free"] },
+        "category:*": { backend: "commandcode", models: ["qwen/qwen3.8-max"] },
+      },
+    };
+
+    const result = resolveTargetRoute(config, "category:writing", {
+      backend: "commandcode",
+    });
+    expect(result.key).toBe("category:*");
+    expect(result.backendName).toBe("commandcode");
+    expect(result.backend.type).toBe("command");
+    expect(result.models).toEqual(["qwen/qwen3.8-max"]);
+  });
+});
