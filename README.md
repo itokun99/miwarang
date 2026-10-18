@@ -35,21 +35,242 @@ senpi -e ~/Projects/miwarang/src/extension.js
 
 Set `MIWARANG_CONFIG` to use a different config file. Without it, the extension reads `~/.config/miwarang/config.json`.
 
-## OMO routing
+## Multi-harness routing
 
-The example routes these OMO targets through OpenCode:
+Miwarang routes each OMO target to a configured backend. Routes resolve in this order: exact key, then the `category:*` or `agent:*` wildcard, then `defaultRoute`. A target that does not resolve fails closed with `No route configured for <target>`.
 
-| Target | Preferred free model |
+### Category → backend
+
+| Target | Backend |
 | --- | --- |
-| `category:quick` | `opencode/space-bunny-free` |
-| `category:unspecified-low` | `opencode-go/longcat-2.5-preview-free` |
-| `category:deep-low` | `opencode-go/step-5-preview-free` |
-| `agent:explore` | `opencode-go/longcat-2.5-preview-free` |
-| `agent:librarian` | `opencode-go/longcat-2.5-preview-free` |
+| `category:quick` | `opencode` |
+| `category:unspecified-low` | `opencode` |
+| `category:unspecified-high` | `opencode` |
+| `category:deep-low` | `opencode` |
+| `category:deep-high` | `opencode` |
+| `category:ultrabrain` | `opencode` |
+| `category:artistry` | `opencode` |
+| `category:architect` | `opencode` |
+| `category:writing` | `commandcode` |
+| `category:visual-engineering` | `opencode` |
+| `agent:explore` | `opencode` |
+| `agent:librarian` | `opencode` |
+| `agent:plan-consultant` | `opencode` |
+| `agent:plan-reviewer` | `opencode` |
+| `agent:omo-native-code-reviewer` | `commandcode` |
+| `agent:omo-native-gate-reviewer` | `commandcode` |
+| `agent:omo-native-qa-executor` | `commandcode` |
 
-When a native OMO `task` call targets one of these routes, the extension blocks that call and guides the parent agent to `miwarang_delegate`. Other native OMO task calls remain unchanged. `freeOnly` routes are checked against the current OpenCode model catalog, and configured model candidates are tried in order. An unavailable or paid-only route fails instead of silently selecting another model.
+All 10 categories and 7 agents are routed in the example config below. `category:ultrabrain` and `category:deep-high` set `blockNativeTask: false`, so they are routed without intercepting native `task` calls; the top-level `blockNativeTask: "all"` blocks native `task` for every other category and agent target. `freeOnly` routes are checked against the live OpenCode model catalog; configured candidates are tried in order and an unavailable or paid-only route fails instead of silently selecting another model. This invariant applies to `freeOnly` routes on the opencode backend; command backends use `pricePolicy` to control model selection.
 
-Set `model` or `agent` on `miwarang_delegate` to override the selected route for one task. OpenCode agent names must exist in the user's OpenCode configuration.
+### Block policy
+
+Native OMO `task` calls are intercepted based on an explicit policy, independent of route presence:
+
+- Top-level `blockNativeTask` (default `"configured"`): `true` or `"configured"` blocks targets that resolve to an exact or wildcard route; `"all"` blocks every category/agent target (requires a wildcard route or `defaultRoute`); `false` or `"none"` disables blocking; a string array blocks only the listed targets.
+- Per-route `blockNativeTask` overrides the top-level value for that route. Set it to `false` to route a target without intercepting native `task` calls for it.
+
+When a native `task` call is blocked, the parent agent is guided to call `miwarang_delegate` with the same prompt and target.
+
+### Per-call overrides
+
+Pass `backend` to `miwarang_delegate` to route a single call to a different backend than the route's. The override must name a configured backend. `model` and `agent` overrides work the same way.
+
+### Commandcode recipe
+
+To add the commandcode harness as a backend:
+
+```json
+"commandcode": {
+  "type": "command",
+  "command": "commandcode",
+  "args": ["-p", "--model", "{{model}}", "--no-session", "--yolo", "-t"],
+  "promptInput": "argument",
+  "timeoutMs": 900000,
+  "pricePolicy": "any"
+}
+```
+
+`--yolo` is required: commandcode's print mode denies file writes and shell by default, so without `--yolo` the harness cannot perform edits or run tools. With `--yolo`, commandcode auto-approves every tool call — scope each delegation with an explicit `cwd` and prefer dedicated worktrees for risky edits.
+
+### Example config
+
+The committed example config (`config.example.json`) routes all 10 categories and 7 agents:
+
+```json
+{
+  "defaultBackend": "opencode",
+  "backends": {
+    "opencode": {
+      "type": "opencode-v2",
+      "command": "opencode"
+    },
+    "commandcode": {
+      "type": "command",
+      "command": "commandcode",
+      "args": ["-p", "--model", "{{model}}", "--no-session", "--yolo", "-t"],
+      "promptInput": "argument",
+      "timeoutMs": 900000
+    }
+  },
+  "routes": {
+    "category:quick": {
+      "backend": "opencode",
+      "models": [
+        "opencode/space-bunny-free",
+        "opencode/mimo-v2.6-flash-free"
+      ],
+      "freeOnly": true
+    },
+    "category:unspecified-low": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/longcat-2.5-preview-free"
+      ],
+      "freeOnly": true
+    },
+    "category:deep-low": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/nemotron-3.5-super-vl-free"
+      ],
+      "freeOnly": true
+    },
+    "category:unspecified-high": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/nemotron-3.5-lightning-free"
+      ],
+      "freeOnly": true
+    },
+    "category:writing": {
+      "backend": "commandcode",
+      "models": [
+        "qwen/qwen3.8-max",
+        "moonshotai/kimi-k3"
+      ]
+    },
+    "category:artistry": {
+      "backend": "opencode",
+      "models": [
+        "opencode/space-bunny-free",
+        "opencode/glm-5.3-flash-free"
+      ],
+      "freeOnly": true
+    },
+    "category:architect": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/nemotron-3.5-lightning-free"
+      ],
+      "freeOnly": true
+    },
+    "category:visual-engineering": {
+      "backend": "opencode",
+      "models": [
+        "opencode/nemotron-3.5-super-vl-free",
+        "opencode/mimo-v2.6-flash-free"
+      ],
+      "freeOnly": true
+    },
+    "category:ultrabrain": {
+      "backend": "opencode",
+      "models": [
+        "opencode/nemotron-3-ultra-free",
+        "opencode/deepseek-v4.1-flash-free",
+        "opencode/big-pickle"
+      ],
+      "freeOnly": true,
+      "blockNativeTask": false
+    },
+    "category:deep-high": {
+      "backend": "opencode",
+      "models": [
+        "opencode/deepseek-v4.1-flash-free",
+        "opencode/nemotron-3-ultra-free",
+        "opencode/big-pickle"
+      ],
+      "freeOnly": true,
+      "blockNativeTask": false
+    },
+    "agent:explore": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/space-bunny-free"
+      ],
+      "freeOnly": true
+    },
+    "agent:librarian": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/space-bunny-free"
+      ],
+      "freeOnly": true
+    },
+    "agent:plan-consultant": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/nemotron-3.5-lightning-free"
+      ],
+      "freeOnly": true
+    },
+    "agent:plan-reviewer": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/longcat-2.5-preview-free",
+        "opencode/nemotron-3.5-lightning-free"
+      ],
+      "freeOnly": true
+    },
+    "agent:omo-native-code-reviewer": {
+      "backend": "commandcode",
+      "models": [
+        "qwen/qwen3.8-max",
+        "moonshotai/kimi-k3"
+      ]
+    },
+    "agent:omo-native-gate-reviewer": {
+      "backend": "commandcode",
+      "models": [
+        "qwen/qwen3.8-max",
+        "moonshotai/kimi-k3"
+      ]
+    },
+    "agent:omo-native-qa-executor": {
+      "backend": "commandcode",
+      "models": [
+        "qwen/qwen3.8-max",
+        "moonshotai/kimi-k3"
+      ]
+    },
+    "category:*": {
+      "backend": "opencode",
+      "models": [
+        "opencode-go/beam-free",
+        "opencode-go/longcat-2.5-preview-free"
+      ],
+      "freeOnly": true
+    }
+  },
+  "defaultRoute": {
+    "backend": "opencode",
+    "models": [
+      "opencode-go/longcat-2.5-preview-free",
+      "opencode/space-bunny-free"
+    ],
+    "freeOnly": true
+  },
+  "blockNativeTask": "all",
+  "runsDirectory": "~/.local/state/miwarang/runs"
+}
+```
 
 ## Foreground and background work
 

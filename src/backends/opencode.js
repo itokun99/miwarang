@@ -29,10 +29,19 @@ export function createOpenCodeBackend({
 
   async function listModels() {
     const payload = await request("GET", "/api/model");
-    if (!Array.isArray(payload?.data)) {
+    const data = payload?.data;
+    if (!Array.isArray(data)) {
       throw new Error("OpenCode model catalog response has no data array");
     }
-    return payload.data;
+    if (data.length > 0) return data;
+
+    // F-6 cold start: the catalog can briefly come back empty; retry once.
+    const retryPayload = await request("GET", "/api/model");
+    const retryData = retryPayload?.data;
+    if (!Array.isArray(retryData)) {
+      throw new Error("OpenCode model catalog response has no data array");
+    }
+    return retryData;
   }
 
   async function start({ cwd, target, model, agent, prompt }) {
