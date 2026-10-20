@@ -5,6 +5,22 @@ import { loadConfig, resolveRoute, resolveTargetRoute } from "./config.js";
 import { createCommandBackend } from "./backends/command.js";
 import { createOpenCodeBackend } from "./backends/opencode.js";
 import { RunStore } from "./runs/store.js";
+import {
+  buildEvalCode,
+  buildWatchDefinition,
+  createRunTracker,
+  formatRunTable,
+  formatStatusLine,
+  isTerminalState,
+  normalizeDagWatch,
+  parseWatchRunId,
+  shortId,
+} from "./watch.js";
+
+// How often the footer status line re-reads command run records while a run is
+// alive. Opencode sessions have no cheap state probe, so only command runs
+// drive this interval.
+const STATUS_POLL_MS = 15_000;
 
 export default async function miwarangExtension(pi) {
   const configPath =
@@ -13,9 +29,37 @@ export default async function miwarangExtension(pi) {
   setupExtension(pi, { config });
 }
 
-export function setupExtension(pi, { config, backends: injectedBackends, runStore } = {}) {
+export function setupExtension(pi, { config, backends: injectedBackends, runStore, timers } = {}) {
   const store = runStore ?? new RunStore({ directory: config.runsDirectory });
   const backends = injectedBackends ?? createBackends(config, store);
+  const dagWatch = normalizeDagWatch(config.dagWatch);
+  const tracker = createRunTracker({
+    readCommandState: async (id) => (await store.get(id))?.state,
+  });
+  const clock = timers ?? { setInterval, clearInterval };
+  let statusTimer;
+  let statusCtx;
+
+  function syncStatus(ctx) {
+    statusCtx = ctx ?? statusCtx;
+    const runs = tracker.list();
+    if (typeof statusCtx?.ui?.setStatus === "function") {
+      statusCtx.ui.setStatus("miwarang", formatStatusLine(runs));
+    }
+    const needsPoll = runs.some(
+      (run) => run.backendType === "command" && !isTerminalState(run.state),
+    );
+    if (needsPoll && !statusTimer) {
+      statusTimer = clock.setInterval(async () => {
+        await tracker.refresh();
+        syncStatus();
+      }, STATUS_POLL_MS);
+      statusTimer?.unref?.();
+    } else if (!needsPoll && statusTimer) {
+      clock.clearInterval(statusTimer);
+      statusTimer = undefined;
+    }
+  }
 
   pi.registerTool({
     name: "miwarang_delegate",
@@ -35,6 +79,7 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         "category:* or agent:* wildcard, then defaultRoute. Pass the full target " +
         "prefix, preserve the task prompt, and map run_in_background to mode background.",
       "Use miwarang_wait or miwarang_cancel with the returned session or run ID for background work.",
+      "Background delegations are tracked automatically: the session status line lists active runs, /miwarang shows the full table, and a dag watch run renders their progress in /dag.",
     ],
     parameters: Type.Object({
       target: Type.String(),
@@ -84,14 +129,35 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
 
       if (mode === "background") {
         const id = result.sessionId ?? result.runId;
+        tracker.track({
+          id,
+          backend: backendId,
+          backendType: resolved.backend.type,
+          target,
+          startedAt: Date.now(),
+        });
+        syncStatus(ctx);
+        const watch = dagWatch.enabled
+          ? await startWatchDag(ctx, {
+              id,
+              backendType: resolved.backend.type,
+              target,
+              runsDirectory: store.directory,
+              watch: dagWatch,
+            })
+          : undefined;
+        let text = `Started ${target} in background (${id}).`;
+        if (watch?.runId) text += ` Dag watch: ${watch.runId}.`;
+        if (watch?.error) text += ` Dag watch unavailable: ${watch.error}.`;
         return {
-          content: [{ type: "text", text: `Started ${target} in background (${id}).` }],
+          content: [{ type: "text", text }],
           details: {
             ...result,
             backend: backendId,
             resolvedVia: resolvedViaValue,
             model: route.model,
             target,
+            ...(watch ? { dagWatch: watch } : {}),
           },
         };
       }
@@ -122,10 +188,12 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         backend: Type.Optional(Type.String()),
       }),
     ]),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const id = delegatedId(params);
       const backendId = await backendForRun(config, id, params.backend, store);
       const result = await backends[backendId].wait(id);
+      tracker.resolve(id, result.state ?? "completed");
+      syncStatus(ctx);
       return {
         content: [{ type: "text", text: result.text || `Task state: ${result.state}.` }],
         details: { ...result, backend: backendId },
@@ -147,14 +215,25 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         backend: Type.Optional(Type.String()),
       }),
     ]),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const id = delegatedId(params);
       const backendId = await backendForRun(config, id, params.backend, store);
       const result = await backends[backendId].cancel(id);
+      tracker.resolve(id, result.state ?? "cancelled");
+      syncStatus(ctx);
       return {
         content: [{ type: "text", text: `Cancellation state: ${result.state ?? result.interrupted}.` }],
         details: { ...result, backend: backendId },
       };
+    },
+  });
+
+  pi.registerCommand("miwarang", {
+    description: "Show the miwarang background runs tracked in this session",
+    handler: async (_args, ctx) => {
+      await tracker.refresh();
+      syncStatus(ctx);
+      ctx.ui.notify(formatRunTable(tracker.list()), "info");
     },
   });
 
@@ -174,6 +253,32 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         "when run_in_background is true, then track the returned ID with miwarang_wait or miwarang_cancel.",
     };
   });
+}
+
+// The dag `workflow` tool is exposure-hidden from model calls, and a plain
+// ctx.executeTool("workflow", ...) cannot reach it ("Tool workflow not found",
+// verified 2026-10-20); the eval kernel's `tool` proxy can, so the watch
+// bridge runs one eval cell and reads the run back from the cell output.
+// Runs created here are ordinary dag runs: /dag, the status widget, and any
+// dag pane (for example omo-tmux-dag) render them like any other run.
+async function startWatchDag(ctx, { id, backendType, target, runsDirectory, watch }) {
+  if (typeof ctx?.executeTool !== "function") {
+    return { error: "this host does not offer ctx.executeTool" };
+  }
+  const definition = buildWatchDefinition({ id, backendType, target, runsDirectory, watch });
+  try {
+    const response = await ctx.executeTool("eval", {
+      action: "run",
+      language: "js",
+      summary: `miwarang dag watch ${shortId(id)}`,
+      code: buildEvalCode(definition),
+    });
+    const text = response?.content?.[0]?.text ?? "";
+    const runId = parseWatchRunId(text);
+    return runId ? { runId } : { error: "the dag start returned no run id" };
+  } catch (error) {
+    return { error: String(error?.message ?? error) };
+  }
 }
 
 function createBackends(config, store = new RunStore({ directory: config.runsDirectory })) {

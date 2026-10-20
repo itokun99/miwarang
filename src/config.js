@@ -170,6 +170,28 @@ export function validateConfig(config) {
   if (config.pricePolicy !== undefined && !PRICE_POLICIES.includes(config.pricePolicy)) {
     throw new Error(`pricePolicy must be one of: ${PRICE_POLICIES.join(", ")}`);
   }
+
+  if (config.dagWatch !== undefined) {
+    validateDagWatch(config.dagWatch);
+  }
+}
+
+function validateDagWatch(value) {
+  if (value === false || value === true) return;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("dagWatch must be false, true, or an object");
+  }
+  if (
+    value.category !== undefined &&
+    (typeof value.category !== "string" || value.category === "")
+  ) {
+    throw new Error("dagWatch.category must be a non-empty string");
+  }
+  for (const key of ["pollSeconds", "timeoutMinutes"]) {
+    if (value[key] !== undefined && (typeof value[key] !== "number" || !(value[key] > 0))) {
+      throw new Error(`dagWatch.${key} must be a positive number`);
+    }
+  }
 }
 
 function modelIdFor(model) {

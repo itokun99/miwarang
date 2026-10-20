@@ -96,9 +96,10 @@ const wildcardOverrideConfig = {
   },
 };
 
-function makeHarness({ config: activeConfig = config, backends, runStore } = {}) {
+function makeHarness({ config: activeConfig = config, backends, runStore, timers } = {}) {
   const tools = new Map();
   const handlers = new Map();
+  const commands = new Map();
   const calls = [];
   const backend = {
     listModels: async () => liveModels,
@@ -143,6 +144,9 @@ function makeHarness({ config: activeConfig = config, backends, runStore } = {})
     registerTool(tool) {
       tools.set(tool.name, tool);
     },
+    registerCommand(name, command) {
+      commands.set(name, command);
+    },
     on(name, handler) {
       const registered = handlers.get(name) ?? [];
       registered.push(handler);
@@ -154,13 +158,14 @@ function makeHarness({ config: activeConfig = config, backends, runStore } = {})
     config: activeConfig,
     backends: backends ?? { opencode: backend, commandcode: commandBackend },
     runStore,
+    timers: timers ?? { setInterval: () => 0, clearInterval: () => {} },
   });
 
-  return { tools, handlers, calls, backend, commandBackend };
+  return { tools, handlers, commands, calls, backend, commandBackend };
 }
 
-async function invoke(tool, params) {
-  return tool.execute("test-call", params, undefined, undefined, { cwd: "/workspace" });
+async function invoke(tool, params, ctx = { cwd: "/workspace" }) {
+  return tool.execute("test-call", params, undefined, undefined, ctx);
 }
 
 describe("Senpi extension", () => {
@@ -973,5 +978,203 @@ describe("command backend pricePolicy", () => {
         prompt: "Do the thing",
       }),
     ).rejects.toThrow(/free/i);
+  });
+});
+
+describe("dag watch bridge", () => {
+  const DAG_ID = "dag_33333333-4444-5555-6666-777777777777";
+
+  function evalRecorder(runId) {
+    const calls = [];
+    return {
+      calls,
+      executeTool: async (name, args) => {
+        calls.push([name, args]);
+        const inner = JSON.stringify(
+          runId ? { ok: true, run_id: runId } : { ok: false, error: "no run id" },
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                toolCall: { name },
+                result: { content: [{ type: "text", text: inner }] },
+              }),
+            },
+          ],
+        };
+      },
+    };
+  }
+
+  test("a background delegation starts a watch run through the eval relay", async () => {
+    const { tools } = makeHarness();
+    const relay = evalRecorder(DAG_ID);
+
+    const result = await invoke(
+      tools.get("miwarang_delegate"),
+      { target: "agent:explore", prompt: "List files", mode: "background" },
+      { cwd: "/workspace", executeTool: relay.executeTool },
+    );
+
+    expect(relay.calls).toHaveLength(1);
+    const [name, args] = relay.calls[0];
+    expect(name).toBe("eval");
+    expect(args.action).toBe("run");
+    expect(args.language).toBe("js");
+    expect(args.summary).toContain("miwarang dag watch");
+    expect(args.code).toContain('tool.workflow({ action: "start", definition })');
+    expect(args.code).toContain("miwarang-ses_background");
+    expect(result.details.dagWatch).toEqual({ runId: DAG_ID });
+    expect(result.content[0].text).toContain(`Dag watch: ${DAG_ID}`);
+  });
+
+  test("a command-backend watch embeds the run record path in the node prompt", async () => {
+    const { tools } = makeHarness({ config: wildcardOverrideConfig });
+    const relay = evalRecorder(DAG_ID);
+
+    await invoke(
+      tools.get("miwarang_delegate"),
+      { target: "category:architect", prompt: "Do it", mode: "background" },
+      { cwd: "/workspace", executeTool: relay.executeTool },
+    );
+
+    const code = relay.calls[0][1].code;
+    expect(code).toContain("ses_command_background.json");
+    expect(code).toContain("Poll every 30 seconds");
+  });
+
+  test("a failing bridge never fails the delegation", async () => {
+    const { tools } = makeHarness();
+
+    const result = await invoke(
+      tools.get("miwarang_delegate"),
+      { target: "agent:explore", prompt: "List files", mode: "background" },
+      {
+        cwd: "/workspace",
+        executeTool: async () => {
+          throw new Error("kaboom");
+        },
+      },
+    );
+
+    expect(result.details.dagWatch).toEqual({ error: "kaboom" });
+    expect(result.content[0].text).toContain("Dag watch unavailable: kaboom");
+    expect(result.details.sessionId).toBe("ses_background");
+  });
+
+  test("a host without executeTool reports the bridge as unavailable", async () => {
+    const { tools } = makeHarness();
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "agent:explore",
+      prompt: "List files",
+      mode: "background",
+    });
+
+    expect(result.details.dagWatch.error).toContain("ctx.executeTool");
+  });
+
+  test("dagWatch false skips the bridge entirely", async () => {
+    const { tools } = makeHarness({ config: { ...config, dagWatch: false } });
+    const relay = evalRecorder(DAG_ID);
+
+    const result = await invoke(
+      tools.get("miwarang_delegate"),
+      { target: "agent:explore", prompt: "List files", mode: "background" },
+      { cwd: "/workspace", executeTool: relay.executeTool },
+    );
+
+    expect(relay.calls).toHaveLength(0);
+    expect(result.details.dagWatch).toBeUndefined();
+    expect(result.content[0].text).not.toContain("Dag watch");
+  });
+
+  test("foreground delegations never start a watch", async () => {
+    const { tools } = makeHarness();
+    const relay = evalRecorder(DAG_ID);
+
+    await invoke(
+      tools.get("miwarang_delegate"),
+      { target: "category:quick", prompt: "Inspect", mode: "foreground" },
+      { cwd: "/workspace", executeTool: relay.executeTool },
+    );
+
+    expect(relay.calls).toHaveLength(0);
+  });
+});
+
+describe("progress surfaces", () => {
+  function uiRecorder() {
+    const statuses = [];
+    const notices = [];
+    return {
+      statuses,
+      notices,
+      ui: {
+        setStatus: (key, text) => statuses.push([key, text]),
+        notify: (text, level) => notices.push([text, level]),
+      },
+    };
+  }
+
+  test("the status line shows a run on start and clears after wait", async () => {
+    const { tools } = makeHarness();
+    const { statuses, ui } = uiRecorder();
+    const ctx = { cwd: "/workspace", ui };
+
+    await invoke(
+      tools.get("miwarang_delegate"),
+      { target: "agent:explore", prompt: "List files", mode: "background" },
+      ctx,
+    );
+    expect(statuses.at(-1)[0]).toBe("miwarang");
+    expect(statuses.at(-1)[1]).toContain("1 active");
+    expect(statuses.at(-1)[1]).toContain("ses_");
+
+    await invoke(tools.get("miwarang_wait"), { sessionId: "ses_background" }, ctx);
+    expect(statuses.at(-1)).toEqual(["miwarang", undefined]);
+  });
+
+  test("/miwarang reports the tracked runs", async () => {
+    const { tools, commands } = makeHarness();
+    const { notices, ui } = uiRecorder();
+    const ctx = { cwd: "/workspace", ui };
+
+    await invoke(
+      tools.get("miwarang_delegate"),
+      { target: "agent:explore", prompt: "List files", mode: "background" },
+      ctx,
+    );
+    await commands.get("miwarang").handler("", ctx);
+
+    const [text, level] = notices.at(-1);
+    expect(text).toContain("ses_background");
+    expect(text).toContain("agent:explore");
+    expect(level).toBe("info");
+  });
+
+  test("the command backend status line polls the run store while alive", async () => {
+    const intervals = [];
+    const { tools } = makeHarness({
+      config: wildcardOverrideConfig,
+      timers: {
+        setInterval: (fn, ms) => {
+          intervals.push(ms);
+          return intervals.length;
+        },
+        clearInterval: () => {},
+      },
+    });
+    const { ui } = uiRecorder();
+
+    await invoke(
+      tools.get("miwarang_delegate"),
+      { target: "category:architect", prompt: "Do it", mode: "background" },
+      { cwd: "/workspace", ui },
+    );
+
+    expect(intervals).toEqual([15000]);
   });
 });

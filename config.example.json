@@ -168,5 +168,6 @@
     "freeOnly": true
   },
   "blockNativeTask": "all",
+  "dagWatch": { "category": "quick" },
   "runsDirectory": "~/.local/state/miwarang/runs"
 }
