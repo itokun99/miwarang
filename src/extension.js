@@ -80,13 +80,22 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         "prefix, preserve the task prompt, and map run_in_background to mode background.",
       "Use miwarang_wait or miwarang_cancel with the returned session or run ID for background work.",
       "Background delegations are tracked automatically: the session status line lists active runs, /miwarang shows the full table, and a dag watch run renders their progress in /dag.",
+      "Model choice belongs to the target harness: omit model so Miwarang selects from the route's configured candidates after checking the live target catalogue (freeOnly routes fail rather than silently fall back to paid). Never forward the OMO session's model name or a model pinned in omo.jsonc; a model outside the target catalogue is rejected.",
     ],
     parameters: Type.Object({
       target: Type.String(),
       prompt: Type.String(),
       mode: Type.Optional(Type.Union([Type.Literal("foreground"), Type.Literal("background")])),
       backend: Type.Optional(Type.String()),
-      model: Type.Optional(Type.String()),
+      model: Type.Optional(
+        Type.String({
+          description:
+            "Optional target-harness model id; it must exist in the target's live catalog " +
+            "(the OpenCode model catalog, or a command backend's model list). Omit it so " +
+            "Miwarang picks from the route's configured candidates. Never pass the OMO " +
+            "session's own model or a model pinned in omo.jsonc.",
+        }),
+      ),
       agent: Type.Optional(Type.String()),
       cwd: Type.Optional(Type.String()),
     }),
@@ -103,28 +112,66 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
       const liveModels =
         resolved.backend.type === "opencode-v2"
           ? await backend.listModels()
-          : configuredCommandModels(resolved, params.model);
-      const route = resolveRoute(
-        {
-          ...config,
-          routes: { ...config.routes, [target]: modelSelectionRoute(resolved) },
-        },
-        target,
-        liveModels,
-        { model: params.model, agent: params.agent },
-      );
-      const request = {
+          : ((await backend.listModels?.()) ?? configuredCommandModels(resolved, params.model));
+      const routeWith = (models) => ({
+        ...config,
+        routes: { ...config.routes, [target]: modelSelectionRoute(resolved, models) },
+      });
+      let route = resolveRoute(routeWith(), target, liveModels, {
+        model: params.model,
+        agent: params.agent,
+      });
+      const requestFor = (model) => ({
         cwd: params.cwd ?? ctx?.cwd ?? pi.cwd ?? process.cwd(),
         target,
-        model: route.model,
+        model,
         agent: route.agent,
         prompt: params.prompt,
+      });
+      // A run-time provider failure (for example a 402 "endpoint
+      // unavailable") is invisible to the catalogue check, so foreground
+      // opencode runs continue down the configured candidates until one
+      // produces text. An explicit model override is honoured as-is, and
+      // background runs report the failure through miwarang_wait instead of
+      // retrying silently.
+      const nextCandidateAfterFailure = (error, tried) => {
+        if (params.model !== undefined) return undefined;
+        if (resolved.backend.type !== "opencode-v2") return undefined;
+        if (
+          !/^OpenCode session \S+ (?:failed:|returned no assistant text)/.test(
+            String(error?.message),
+          )
+        ) {
+          return undefined;
+        }
+        const remaining = resolved.models.filter((model) => !tried.includes(model));
+        if (!remaining.length) return undefined;
+        try {
+          return resolveRoute(routeWith(remaining), target, liveModels, {
+            agent: params.agent,
+          });
+        } catch {
+          return undefined;
+        }
       };
       const mode = params.mode ?? "foreground";
-      const result =
-        mode === "background"
-          ? await backend.start(request)
-          : await backend.runForeground(request);
+      let result;
+      if (mode === "background") {
+        result = await backend.start(requestFor(route.model));
+      } else {
+        const tried = [];
+        for (;;) {
+          try {
+            result = await backend.runForeground(requestFor(route.model));
+            break;
+          } catch (error) {
+            tried.push(route.model);
+            const next = nextCandidateAfterFailure(error, tried);
+            if (!next) throw error;
+            route = next;
+          }
+        }
+      }
       const resolvedViaValue = resolvedVia(resolved.key, target);
 
       if (mode === "background") {
@@ -301,17 +348,18 @@ function effectivePricePolicy(route) {
   return route.pricePolicy ?? route.backend?.pricePolicy ?? "any";
 }
 
-// The route handed to resolveRoute. A command backend has no live catalog, so
-// when the effective pricePolicy is "any" the freeOnly constraint cannot be
-// enforced there; dropping it lets the command candidates through. opencode-v2
-// keeps its catalog-backed freeOnly gate unchanged.
-function modelSelectionRoute(resolved) {
+// The route handed to resolveRoute. A command backend without a model-list
+// probe (listModelsArgv) cannot verify availability or prices, so when the
+// effective pricePolicy is "any" its freeOnly constraint is dropped there.
+// opencode-v2 and probing command backends keep the catalogue-backed gate.
+function modelSelectionRoute(resolved, models = resolved.models) {
   const pricePolicy = effectivePricePolicy(resolved);
-  const commandBackend = resolved.backend?.type === "command";
-  const freeOnly = resolved.freeOnly && !(commandBackend && pricePolicy === "any");
+  const unverifiableCommand =
+    resolved.backend?.type === "command" && !resolved.backend?.listModelsArgv;
+  const freeOnly = resolved.freeOnly && !(unverifiableCommand && pricePolicy === "any");
   return {
     backend: resolved.backendName,
-    models: resolved.models,
+    models,
     freeOnly,
     agent: resolved.agent,
   };
@@ -323,8 +371,10 @@ function resolvedVia(key, target) {
   return "wildcard";
 }
 
-// Command backends have no live model catalog, so a freeOnly route only
-// reaches one when the effective pricePolicy allows any model. The route-level
+// Fallback catalogue for command backends without a listModelsArgv probe, or
+// when that probe fails: the configured candidates themselves become the
+// catalogue with unknown (non-free) pricing, so a freeOnly route only reaches
+// one when the effective pricePolicy allows any model. The route-level
 // pricePolicy wins over the backend-level one; both default to "any".
 export function configuredCommandModels(route, modelOverride) {
   const ids = modelOverride ? [modelOverride] : route.models;
@@ -335,7 +385,7 @@ export function configuredCommandModels(route, modelOverride) {
   return ids.map((id) => {
     const slash = id.indexOf("/");
     return slash < 1
-      ? { providerID: "command", id, cost: { input: 1, output: 1 } }
+      ? { providerID: "", id, cost: { input: 1, output: 1 } }
       : { providerID: id.slice(0, slash), id: id.slice(slash + 1), cost: { input: 1, output: 1 } };
   });
 }

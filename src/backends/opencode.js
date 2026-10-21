@@ -91,6 +91,15 @@ export function createOpenCodeBackend({
       .find((message) => messageText(message).length > 0);
     const text = withText ? messageText(withText) : "";
     if (!text) {
+      const failed = [...messages]
+        .filter(isAssistant)
+        .sort((a, b) => completedAt(b) - completedAt(a))
+        .find((message) => message.error);
+      if (failed) {
+        throw new Error(
+          `OpenCode session ${sessionId} failed: ${describeProviderError(failed.error)}`,
+        );
+      }
       throw new Error(`OpenCode session ${sessionId} returned no assistant text`);
     }
     return { sessionId, text };
@@ -124,6 +133,18 @@ function modelReference(modelId) {
     providerID: modelId.slice(0, slash),
     id: modelId.slice(slash + 1),
   };
+}
+
+// Provider failures surface as an `error` object on the assistant step (for
+// example provider.quota with status 402 and an empty reply). Keeping type,
+// status, and message lets callers classify the failure instead of guessing
+// from missing text; the delegate uses this shape to fail over to the next
+// configured candidate.
+function describeProviderError(error) {
+  const parts = [error?.type ?? "provider error"];
+  if (error?.status !== undefined) parts.push(`(${error.status})`);
+  if (error?.message) parts.push(String(error.message));
+  return parts.join(" ");
 }
 
 function messageText(message) {

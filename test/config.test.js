@@ -111,6 +111,29 @@ describe("resolveRoute", () => {
     ).toThrow(/no available free model/i);
   });
 
+  test("an unavailable override reports the catalogue size", () => {
+    expect(() =>
+      resolveRoute(config, "category:quick", liveModels, { model: "cloviela/glm-5.3-flash" }),
+    ).toThrow(
+      "Requested model cloviela/glm-5.3-flash is not in the live model catalog (catalog: 3 models)",
+    );
+  });
+
+  test("matches a bare candidate id when the catalogue entry has no provider prefix", () => {
+    const bare = {
+      backends: { opencode: { type: "opencode-v2", command: "opencode" } },
+      routes: {
+        "category:quick": { backend: "opencode", models: ["claude-sonnet-5-5"] },
+      },
+    };
+
+    expect(
+      resolveRoute(bare, "category:quick", [
+        { providerID: "", id: "claude-sonnet-5-5", cost: { input: 1, output: 1 } },
+      ]).model,
+    ).toBe("claude-sonnet-5-5");
+  });
+
   test("fails clearly for an unconfigured target", () => {
     expect(() =>
       resolveRoute(config, "category:unknown", liveModels),
@@ -442,6 +465,63 @@ describe("new-style routing fail-closed and override", () => {
     expect(result.backendName).toBe("commandcode");
     expect(result.backend.type).toBe("command");
     expect(result.models).toEqual(["qwen/qwen3.8-max"]);
+  });
+});
+
+describe("defaultModels inheritance", () => {
+  const base = {
+    backends: { opencode: { type: "opencode-v2", command: "opencode" } },
+  };
+
+  test("validateConfig accepts routes without models when defaultModels exists", () => {
+    expect(() =>
+      validateConfig({
+        ...base,
+        defaultModels: ["opencode/space-bunny-free"],
+        routes: { "category:quick": { backend: "opencode", freeOnly: true } },
+      }),
+    ).not.toThrow();
+  });
+
+  test("validateConfig rejects a route without models and no defaultModels", () => {
+    expect(() =>
+      validateConfig({
+        ...base,
+        routes: { "category:quick": { backend: "opencode" } },
+      }),
+    ).toThrow(/category:quick must define a models string array.*defaultModels/);
+  });
+
+  test("validateConfig rejects a malformed defaultModels", () => {
+    expect(() =>
+      validateConfig({
+        ...base,
+        defaultModels: "opencode/space-bunny-free",
+        routes: {},
+      }),
+    ).toThrow(/defaultModels must be a string array/);
+    expect(() => validateConfig({ ...base, defaultModels: [7], routes: {} })).toThrow(
+      /defaultModels/,
+    );
+  });
+
+  test("resolveTargetRoute inherits defaultModels unless the route overrides it", () => {
+    const config = {
+      ...base,
+      defaultModels: ["opencode/space-bunny-free", "opencode/big-pickle"],
+      routes: {
+        "category:quick": { backend: "opencode", freeOnly: true },
+        "category:writing": { backend: "opencode", models: ["opencode/big-pickle"] },
+      },
+    };
+
+    expect(resolveTargetRoute(config, "category:quick").models).toEqual([
+      "opencode/space-bunny-free",
+      "opencode/big-pickle",
+    ]);
+    expect(resolveTargetRoute(config, "category:writing").models).toEqual([
+      "opencode/big-pickle",
+    ]);
   });
 });
 

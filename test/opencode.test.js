@@ -291,6 +291,33 @@ describe("OpenCode v2 backend", () => {
     );
   });
 
+  test("wait surfaces a provider failure with its type, status and message", async () => {
+    const { backend } = makeBackend([
+      { stdout: "", stderr: "", exitCode: 0 },
+      jsonResponse({
+        data: [
+          { id: "msg_idle", type: "idle", time: { created: 2 }, outcome: "failed" },
+          {
+            id: "msg_assistant_error",
+            type: "assistant",
+            time: { created: 1, completed: 2 },
+            content: [],
+            finish: "error",
+            error: {
+              type: "provider.quota",
+              message: "Upstream request failed: Endpoint is unavailable.",
+              status: 402,
+            },
+          },
+        ],
+      }),
+    ]);
+
+    await expect(backend.wait("ses_test123")).rejects.toThrow(
+      "OpenCode session ses_test123 failed: provider.quota (402) Upstream request failed: Endpoint is unavailable.",
+    );
+  });
+
   test("reports a timed-out CLI run as exit 124 and keeps stderr", async () => {
     const result = await runOpenCodeCli("sh", ["-c", "printf 'boom' >&2; exec sleep 5"], {
       timeoutMs: 50,

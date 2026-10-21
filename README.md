@@ -61,7 +61,7 @@ Miwarang routes each OMO target to a configured backend. Routes resolve in this 
 | `agent:omo-native-gate-reviewer` | `commandcode` |
 | `agent:omo-native-qa-executor` | `commandcode` |
 
-All 10 categories and 7 agents are routed in the example config below. `category:ultrabrain` and `category:deep-high` set `blockNativeTask: false`, so they are routed without intercepting native `task` calls; the top-level `blockNativeTask: "all"` blocks native `task` for every other category and agent target. `freeOnly` routes are checked against the live OpenCode model catalog; configured candidates are tried in order and an unavailable or paid-only route fails instead of silently selecting another model. This invariant applies to `freeOnly` routes on the opencode backend; command backends use `pricePolicy` to control model selection.
+All 10 categories and 7 agents are routed in the example config below. `category:ultrabrain` and `category:deep-high` set `blockNativeTask: false`, so they are routed without intercepting native `task` calls; the top-level `blockNativeTask: "all"` blocks native `task` for every other category and agent target. `freeOnly` routes are checked against the target's live model catalogue; configured candidates are tried in order and an unavailable or paid-only candidate is never silently substituted. That catalogue is the OpenCode model list for `opencode-v2` and the harness's own listing for a command backend with `listModelsArgv` (see [Model selection and availability](#model-selection-and-availability)); a command backend without it keeps the `pricePolicy` behaviour.
 
 ### Block policy
 
@@ -74,7 +74,18 @@ When a native `task` call is blocked, the parent agent is guided to call `miwara
 
 ### Per-call overrides
 
-Pass `backend` to `miwarang_delegate` to route a single call to a different backend than the route's. The override must name a configured backend. `model` and `agent` overrides work the same way.
+Pass `backend` to `miwarang_delegate` to route a single call to a different backend than the route's. The override must name a configured backend. `agent` works the same way. A `model` override must exist in the target's live catalogue (the OpenCode model list, or a command backend's `listModelsArgv` output); anything else is rejected with the catalogue size. Never forward the OMO session's own model (for example a model pinned in `omo.jsonc`): omit `model` and Miwarang selects from the route's configured candidates.
+
+### Model selection and availability
+
+Model choice belongs to the target harness, not to OMO. Each route's `models` array is the ordered preference list — the setup that decides which models a target may use:
+
+- Candidates are checked in order against the target's live catalogue: the OpenCode model catalogue for `opencode-v2` backends, or the command backend's own listing when `listModelsArgv` is configured (for example `["--list-models"]` for commandcode, whose `:free`/`-free` ids count as free). The first available candidate wins; unavailable candidates are skipped, never forwarded.
+- A route may omit `models` to inherit the top-level `defaultModels` chain — the single place to keep the shared ordering (for example the free-model preference list); a per-route `models` array overrides it, and a route with neither fails validation.
+- `freeOnly: true` is the paid guard: a freeOnly route fails loudly instead of falling back to a paid model. Paid models are opt-in per route — list them in `models` on a route without `freeOnly`.
+- A command backend without `listModelsArgv` cannot verify availability or price; its configured list is authoritative and `pricePolicy: "any"` lets freeOnly routes through (unchanged behaviour).
+- Foreground opencode runs fail over to the next candidate when a provider fails at run time (for example a 402 "endpoint unavailable" or an empty reply). An explicit `model` override is never retried elsewhere; background runs report the failure through `miwarang_wait`.
+- A failed model-list probe falls back to the configured candidates so delegations do not break while the harness CLI is unavailable.
 
 ### Commandcode recipe
 
@@ -87,11 +98,12 @@ To add the commandcode harness as a backend:
   "args": ["-p", "--model", "{{model}}", "--no-session", "--yolo", "-t"],
   "promptInput": "argument",
   "timeoutMs": 900000,
-  "pricePolicy": "any"
+  "pricePolicy": "any",
+  "listModelsArgv": ["--list-models"]
 }
 ```
 
-`--yolo` is required: commandcode's print mode denies file writes and shell by default, so without `--yolo` the harness cannot perform edits or run tools. With `--yolo`, commandcode auto-approves every tool call — scope each delegation with an explicit `cwd` and prefer dedicated worktrees for risky edits.
+`--yolo` is required: commandcode's print mode denies file writes and shell by default, so without `--yolo` the harness cannot perform edits or run tools. With `--yolo`, commandcode auto-approves every tool call — scope each delegation with an explicit `cwd` and prefer dedicated worktrees for risky edits. `listModelsArgv` turns on the availability check: `commandcode --list-models` feeds the same candidate validation used for the OpenCode catalogue.
 
 ### Example config
 
@@ -110,7 +122,8 @@ The committed example config (`config.example.json`) routes all 10 categories an
       "command": "commandcode",
       "args": ["-p", "--model", "{{model}}", "--no-session", "--yolo", "-t"],
       "promptInput": "argument",
-      "timeoutMs": 900000
+      "timeoutMs": 900000,
+      "listModelsArgv": ["--list-models"]
     }
   },
   "routes": {
@@ -268,6 +281,7 @@ The committed example config (`config.example.json`) routes all 10 categories an
     "freeOnly": true
   },
   "blockNativeTask": "all",
+  "dagWatch": { "category": "quick" },
   "runsDirectory": "~/.local/state/miwarang/runs"
 }
 ```

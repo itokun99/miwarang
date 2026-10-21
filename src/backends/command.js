@@ -2,6 +2,7 @@ import { spawn as spawnProcess } from "node:child_process";
 import { RunStore } from "../runs/store.js";
 
 const MAX_CAPTURE_BYTES = 1024 * 1024;
+const LIST_MODELS_TIMEOUT_MS = 30_000;
 const SECRET_PATTERNS = [
   /(Bearer\s+)[^\s"'`]+/gi,
   /((?:api[-_]?key|token|secret)\s*[:=]\s*)[^\s"'`]+/gi,
@@ -50,7 +51,41 @@ export function buildCommandInvocation(config, request) {
   };
 }
 
+// Command CLIs that expose a model listing (for example `commandcode
+// --list-models`) print one model per line as an id token followed by a
+// description column. Section headings, the count header, and footer lines
+// have no description column and are skipped; ids ending in `:free`/`-free`
+// are zero-cost so freeOnly routes can target them. Tokens without a
+// provider prefix keep the bare id.
+export function parseCommandModelList(stdout) {
+  const models = [];
+  for (const line of String(stdout ?? "").split("\n")) {
+    const match = line.match(/^(\S+)(?: {2,}|\t)(\S)/);
+    if (!match) continue;
+    const token = match[1];
+    if (token.endsWith(":")) continue; // footer lines such as "Docs:  https://…"
+    const slash = token.indexOf("/");
+    const providerID = slash < 1 ? "" : token.slice(0, slash);
+    const id = slash < 1 ? token : token.slice(slash + 1);
+    const free = /(:free|-free)$/i.test(token);
+    models.push({
+      providerID,
+      id,
+      cost: free ? { input: 0, output: 0 } : { input: 1, output: 1 },
+    });
+  }
+  return models;
+}
+
 export function createCommandBackend(config, dependencies = {}) {
+  if (
+    config.listModelsArgv !== undefined &&
+    (!Array.isArray(config.listModelsArgv) ||
+      config.listModelsArgv.length === 0 ||
+      config.listModelsArgv.some((arg) => typeof arg !== "string"))
+  ) {
+    throw new Error("Command backend listModelsArgv must be a non-empty string array");
+  }
   const spawn = dependencies.spawn ?? spawnProcess;
   const runStore = dependencies.runStore ?? new RunStore();
   const active = new Map();
@@ -128,6 +163,24 @@ export function createCommandBackend(config, dependencies = {}) {
     }
   }
 
+  // Availability probe for command CLIs that can list their models. Any
+  // failure returns undefined so the caller falls back to the configured
+  // candidates instead of blocking every delegation on an unreachable list
+  // command.
+  async function listModels() {
+    if (!config.listModelsArgv) return undefined;
+    const child = spawn(config.command, config.listModelsArgv, {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const completed = await withTimeout(captureChild(child), LIST_MODELS_TIMEOUT_MS, () =>
+      child.kill("SIGTERM"),
+    ).catch(() => undefined);
+    if (!completed || completed.exitCode !== 0) return undefined;
+    const models = parseCommandModelList(completed.stdout);
+    return models.length ? models : undefined;
+  }
+
   async function wait(runId) {
     const run = active.get(runId);
     if (run) {
@@ -160,7 +213,7 @@ export function createCommandBackend(config, dependencies = {}) {
     return { runId, state: "cancelling", cancelled: true };
   }
 
-  return { runForeground, start, wait, cancel };
+  return { runForeground, start, wait, cancel, listModels };
 }
 
 function captureChild(child, input) {

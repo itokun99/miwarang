@@ -20,7 +20,10 @@ export function resolveRoute(config, target, liveModels, overrides = {}) {
     const model = liveModels.find((candidate) => modelIdFor(candidate) === modelId);
     if (!model) {
       if (overrides.model) {
-        throw new Error(`Requested model ${modelId} is not in the live model catalog`);
+        throw new Error(
+          `Requested model ${modelId} is not in the live model catalog ` +
+            `(catalog: ${liveModels.length} models)`,
+        );
       }
       continue;
     }
@@ -103,16 +106,26 @@ export function resolveTargetRoute(config, target, { backend } = {}) {
     backendName,
     target,
     key,
+    models: route.models ?? config?.defaultModels ?? [],
   };
 }
 
 const PRICE_POLICIES = ["free-only", "free-first", "any"];
 
-function validateRouteShape(name, route) {
+function validateRouteShape(name, route, hasDefaultModels = false) {
   if (!route || typeof route.backend !== "string") {
     throw new Error(`Route ${name} must name a backend`);
   }
-  if (!Array.isArray(route.models) || route.models.some((model) => typeof model !== "string")) {
+  if (route.models === undefined) {
+    if (!hasDefaultModels) {
+      throw new Error(
+        `Route ${name} must define a models string array (or set top-level defaultModels)`,
+      );
+    }
+  } else if (
+    !Array.isArray(route.models) ||
+    route.models.some((model) => typeof model !== "string")
+  ) {
     throw new Error(`Route ${name} must define a models string array`);
   }
   if (route.blockNativeTask !== undefined) {
@@ -137,8 +150,19 @@ export function validateConfig(config) {
     throw new Error("Miwarang config must define a routes object");
   }
 
+  // The shared candidate chain: a route may omit `models` and inherit this
+  // list, so the model ordering lives in one place unless a route overrides it.
+  if (
+    config.defaultModels !== undefined &&
+    (!Array.isArray(config.defaultModels) ||
+      config.defaultModels.some((model) => typeof model !== "string"))
+  ) {
+    throw new Error("defaultModels must be a string array");
+  }
+  const hasDefaultModels = Array.isArray(config.defaultModels);
+
   for (const [target, route] of Object.entries(config.routes)) {
-    validateRouteShape(target, route);
+    validateRouteShape(target, route, hasDefaultModels);
   }
 
   if (config.defaultRoute !== undefined) {
@@ -149,7 +173,7 @@ export function validateConfig(config) {
     ) {
       throw new Error("defaultRoute must be a route object");
     }
-    validateRouteShape("defaultRoute", config.defaultRoute);
+    validateRouteShape("defaultRoute", config.defaultRoute, hasDefaultModels);
   }
 
   if (config.blockNativeTask !== undefined) {
@@ -195,8 +219,12 @@ function validateDagWatch(value) {
 }
 
 function modelIdFor(model) {
-  if (!model || typeof model.providerID !== "string" || typeof model.id !== "string") return "";
-  return `${model.providerID}/${model.id}`;
+  if (!model || typeof model.id !== "string" || model.id === "") return "";
+  // Command CLIs list some models without a provider prefix; the bare id is
+  // then the whole identifier and must match the configured candidate as-is.
+  return typeof model.providerID === "string" && model.providerID !== ""
+    ? `${model.providerID}/${model.id}`
+    : model.id;
 }
 
 function isFree(model) {

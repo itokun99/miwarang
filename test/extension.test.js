@@ -121,7 +121,10 @@ function makeHarness({ config: activeConfig = config, backends, runStore, timers
     },
   };
   const commandBackend = {
-    listModels: async () => liveModels,
+    // Production command backends return undefined unless listModelsArgv is
+    // configured (or when the probe fails); tests that need a live command
+    // catalogue inject their own backend.
+    listModels: async () => undefined,
     runForeground: async (request) => {
       calls.push(["foreground", request]);
       return { sessionId: "ses_command_foreground", text: "Command foreground result" };
@@ -183,6 +186,8 @@ describe("Senpi extension", () => {
     );
     expect(guidance).toContain("category:*");
     expect(guidance).toContain("defaultRoute");
+    expect(guidance).toContain("omo.jsonc");
+    expect(guidance).toContain("Never forward the OMO session's model name");
   });
 
   test("dispatches foreground work to the configured backend and model", async () => {
@@ -1176,5 +1181,246 @@ describe("progress surfaces", () => {
     );
 
     expect(intervals).toEqual([15000]);
+  });
+});
+
+describe("target model availability", () => {
+  const probeConfig = {
+    backends: {
+      commandcode: { type: "command", command: "commandcode", listModelsArgv: ["--list-models"] },
+    },
+    routes: {
+      "category:writing": {
+        backend: "commandcode",
+        models: ["qwen/qwen3.8-max", "moonshotai/kimi-k3"],
+      },
+    },
+  };
+
+  const qwen = { providerID: "qwen", id: "qwen3.8-max", cost: { input: 1, output: 1 } };
+  const kimi = { providerID: "moonshotai", id: "kimi-k3", cost: { input: 1, output: 1 } };
+  const beamFree = { providerID: "reflection", id: "beam:free", cost: { input: 0, output: 0 } };
+
+  function probeBackend(catalog) {
+    const calls = [];
+    return {
+      calls,
+      listModels: async () => catalog,
+      runForeground: async (request) => {
+        calls.push(["foreground", request]);
+        return { sessionId: "ses_probe", text: `probe ran ${request.model}` };
+      },
+      start: async (request) => {
+        calls.push(["start", request]);
+        return { sessionId: "ses_probe_bg", state: "running" };
+      },
+      wait: async (sessionId) => ({ sessionId, text: "probe wait" }),
+      cancel: async (sessionId) => ({ sessionId, interrupted: true }),
+    };
+  }
+
+  test("an unavailable first candidate is skipped for the next probed model", async () => {
+    const backend = probeBackend([kimi]);
+    const { tools } = makeHarness({ config: probeConfig, backends: { commandcode: backend } });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:writing",
+      prompt: "Write the docs",
+    });
+
+    expect(backend.calls[0][1].model).toBe("moonshotai/kimi-k3");
+    expect(result.details.model).toBe("moonshotai/kimi-k3");
+  });
+
+  test("an override that is not in the probed catalogue is rejected", async () => {
+    const backend = probeBackend([kimi]);
+    const { tools } = makeHarness({ config: probeConfig, backends: { commandcode: backend } });
+
+    await expect(
+      invoke(tools.get("miwarang_delegate"), {
+        target: "category:writing",
+        prompt: "Write the docs",
+        model: "cloviela/glm-5.3-flash",
+      }),
+    ).rejects.toThrow(
+      "Requested model cloviela/glm-5.3-flash is not in the live model catalog (catalog: 1 models)",
+    );
+    expect(backend.calls).toHaveLength(0);
+  });
+
+  test("an override that exists in the probed catalogue is honoured", async () => {
+    const backend = probeBackend([qwen, kimi]);
+    const { tools } = makeHarness({ config: probeConfig, backends: { commandcode: backend } });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:writing",
+      prompt: "Write the docs",
+      model: "moonshotai/kimi-k3",
+    });
+
+    expect(backend.calls[0][1].model).toBe("moonshotai/kimi-k3");
+    expect(result.details.model).toBe("moonshotai/kimi-k3");
+  });
+
+  test("a route without models inherits the top-level defaultModels chain", async () => {
+    const inheritedConfig = {
+      backends: { opencode: { type: "opencode-v2", command: "opencode" } },
+      defaultModels: ["opencode/space-bunny-free", "opencode-go/longcat-2.5-preview-free"],
+      routes: { "category:quick": { backend: "opencode", freeOnly: true } },
+    };
+    const { tools, calls } = makeHarness({ config: inheritedConfig });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:quick",
+      prompt: "Hello",
+    });
+
+    expect(calls[0][1].model).toBe("opencode/space-bunny-free");
+    expect(result.details.model).toBe("opencode/space-bunny-free");
+  });
+
+  test("a freeOnly route on a probing command backend only accepts free models", async () => {
+    const freeOnlyConfig = {
+      backends: {
+        commandcode: { type: "command", command: "commandcode", listModelsArgv: ["--list-models"] },
+      },
+      routes: {
+        "category:writing": {
+          backend: "commandcode",
+          models: ["qwen/qwen3.8-max", "reflection/beam:free"],
+          freeOnly: true,
+        },
+      },
+    };
+
+    const paidOnly = probeBackend([qwen]);
+    await expect(
+      invoke(makeHarness({ config: freeOnlyConfig, backends: { commandcode: paidOnly } }).tools.get("miwarang_delegate"), {
+        target: "category:writing",
+        prompt: "Write the docs",
+      }),
+    ).rejects.toThrow(/no available free model/i);
+
+    const withFree = probeBackend([qwen, beamFree]);
+    const result = await invoke(
+      makeHarness({ config: freeOnlyConfig, backends: { commandcode: withFree } }).tools.get("miwarang_delegate"),
+      { target: "category:writing", prompt: "Write the docs" },
+    );
+
+    expect(result.details.model).toBe("reflection/beam:free");
+  });
+});
+
+describe("foreground failover", () => {
+  const failoverConfig = {
+    backends: { opencode: { type: "opencode-v2", command: "opencode" } },
+    routes: {
+      "category:quick": {
+        backend: "opencode",
+        models: ["opencode/space-bunny-free", "opencode-go/longcat-2.5-preview-free"],
+        freeOnly: true,
+      },
+    },
+  };
+
+  function flakyBackend(script) {
+    const calls = [];
+    return {
+      calls,
+      listModels: async () => liveModels,
+      runForeground: async (request) => {
+        calls.push(["foreground", request]);
+        const outcome = script[request.model];
+        if (!outcome) throw new Error(`no outcome for ${request.model}`);
+        if (outcome.error) throw new Error(outcome.error);
+        return { sessionId: "ses_after_failover", text: outcome.text };
+      },
+      start: async (request) => {
+        calls.push(["start", request]);
+        throw new Error(script.startError ?? "start failed");
+      },
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+  }
+
+  const providerError = (id) =>
+    `OpenCode session ${id} failed: provider.quota (402) Upstream request failed: Endpoint is unavailable.`;
+
+  test("a provider failure retries the next configured candidate", async () => {
+    const backend = flakyBackend({
+      "opencode/space-bunny-free": { error: providerError("ses_1") },
+      "opencode-go/longcat-2.5-preview-free": { text: "Recovered result" },
+    });
+    const { tools } = makeHarness({ config: failoverConfig, backends: { opencode: backend } });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:quick",
+      prompt: "Inspect this project",
+    });
+
+    expect(backend.calls.map((call) => call[1].model)).toEqual([
+      "opencode/space-bunny-free",
+      "opencode-go/longcat-2.5-preview-free",
+    ]);
+    expect(result.content[0].text).toContain("Recovered result");
+    expect(result.details.model).toBe("opencode-go/longcat-2.5-preview-free");
+  });
+
+  test("failover stops after the last candidate and surfaces its error", async () => {
+    const backend = flakyBackend({
+      "opencode/space-bunny-free": { error: providerError("ses_1") },
+      "opencode-go/longcat-2.5-preview-free": { error: providerError("ses_2") },
+    });
+    const { tools } = makeHarness({ config: failoverConfig, backends: { opencode: backend } });
+
+    await expect(
+      invoke(tools.get("miwarang_delegate"), { target: "category:quick", prompt: "Inspect" }),
+    ).rejects.toThrow(/ses_2/);
+    expect(backend.calls).toHaveLength(2);
+  });
+
+  test("an explicit model override is never retried on another model", async () => {
+    const backend = flakyBackend({
+      "opencode/space-bunny-free": { error: providerError("ses_1") },
+      "opencode-go/longcat-2.5-preview-free": { text: "should not run" },
+    });
+    const { tools } = makeHarness({ config: failoverConfig, backends: { opencode: backend } });
+
+    await expect(
+      invoke(tools.get("miwarang_delegate"), {
+        target: "category:quick",
+        prompt: "Inspect",
+        model: "opencode/space-bunny-free",
+      }),
+    ).rejects.toThrow(/provider\.quota/);
+    expect(backend.calls).toHaveLength(1);
+  });
+
+  test("non-provider failures do not trigger failover", async () => {
+    const backend = flakyBackend({
+      "opencode/space-bunny-free": { error: "OpenCode API POST /api/session failed (exit 1)" },
+      "opencode-go/longcat-2.5-preview-free": { text: "should not run" },
+    });
+    const { tools } = makeHarness({ config: failoverConfig, backends: { opencode: backend } });
+
+    await expect(
+      invoke(tools.get("miwarang_delegate"), { target: "category:quick", prompt: "Inspect" }),
+    ).rejects.toThrow(/POST \/api\/session/);
+    expect(backend.calls).toHaveLength(1);
+  });
+
+  test("background runs do not fail over", async () => {
+    const backend = flakyBackend({ startError: providerError("ses_1") });
+    const { tools } = makeHarness({ config: failoverConfig, backends: { opencode: backend } });
+
+    await expect(
+      invoke(tools.get("miwarang_delegate"), {
+        target: "category:quick",
+        prompt: "Inspect",
+        mode: "background",
+      }),
+    ).rejects.toThrow(/provider\.quota/);
+    expect(backend.calls).toHaveLength(1);
   });
 });

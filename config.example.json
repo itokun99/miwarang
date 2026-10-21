@@ -10,7 +10,8 @@
       "command": "commandcode",
       "args": ["-p", "--model", "{{model}}", "--no-session", "--yolo", "-t"],
       "promptInput": "argument",
-      "timeoutMs": 900000
+      "timeoutMs": 900000,
+      "listModelsArgv": ["--list-models"]
     }
   },
   "routes": {
