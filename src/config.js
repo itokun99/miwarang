@@ -99,6 +99,8 @@ export function resolveTargetRoute(config, target, { backend } = {}) {
   if (!backendObj) {
     throw new Error(`Backend ${backendName} configured for ${target} does not exist`);
   }
+  const fallbacks =
+    backend === undefined ? resolveFallbackRoutes(config, route, target, key) : [];
 
   return {
     ...route,
@@ -107,12 +109,13 @@ export function resolveTargetRoute(config, target, { backend } = {}) {
     target,
     key,
     models: route.models ?? config?.defaultModels ?? [],
+    fallbacks,
   };
 }
 
 const PRICE_POLICIES = ["free-only", "free-first", "any"];
 
-function validateRouteShape(name, route, hasDefaultModels = false) {
+function validateRouteShape(name, route, hasDefaultModels = false, allowFallbacks = true) {
   if (!route || typeof route.backend !== "string") {
     throw new Error(`Route ${name} must name a backend`);
   }
@@ -130,6 +133,17 @@ function validateRouteShape(name, route, hasDefaultModels = false) {
   }
   if (route.blockNativeTask !== undefined) {
     validateBlockNativeTask(route.blockNativeTask, `Route ${name}`);
+  }
+  if (route.fallbacks !== undefined) {
+    if (!allowFallbacks) {
+      throw new Error(`${name} must not define nested fallbacks`);
+    }
+    if (!Array.isArray(route.fallbacks)) {
+      throw new Error(`${name} fallbacks must be a route object array`);
+    }
+    route.fallbacks.forEach((fallback, index) => {
+      validateRouteShape(`${name}.fallbacks[${index}]`, fallback, hasDefaultModels, false);
+    });
   }
 }
 
@@ -225,6 +239,29 @@ function modelIdFor(model) {
   return typeof model.providerID === "string" && model.providerID !== ""
     ? `${model.providerID}/${model.id}`
     : model.id;
+}
+
+function resolveFallbackRoutes(config, route, target, key) {
+  if (!Array.isArray(route.fallbacks)) return [];
+  return route.fallbacks.map((fallback, index) => {
+    const backendName = fallback.backend;
+    const backend = config?.backends?.[backendName];
+    if (!backend) {
+      throw new Error(
+        `Backend ${backendName} configured for ${target} fallback ${index} does not exist`,
+      );
+    }
+    return {
+      ...fallback,
+      backend,
+      backendName,
+      target,
+      key: `${key}.fallbacks[${index}]`,
+      models: fallback.models ?? config?.defaultModels ?? [],
+      agent: fallback.agent ?? route.agent,
+      fallbacks: [],
+    };
+  });
 }
 
 function isFree(model) {

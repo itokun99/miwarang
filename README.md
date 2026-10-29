@@ -61,7 +61,7 @@ Miwarang routes each OMO target to a configured backend. Routes resolve in this 
 | `agent:omo-native-gate-reviewer` | `commandcode` |
 | `agent:omo-native-qa-executor` | `commandcode` |
 
-All 10 categories and 7 agents are routed in the example config below. `category:ultrabrain` and `category:deep-high` set `blockNativeTask: false`, so they are routed without intercepting native `task` calls; the top-level `blockNativeTask: "all"` blocks native `task` for every other category and agent target. `freeOnly` routes are checked against the target's live model catalogue; configured candidates are tried in order and an unavailable or paid-only candidate is never silently substituted. That catalogue is the OpenCode model list for `opencode-v2` and the harness's own listing for a command backend with `listModelsArgv` (see [Model selection and availability](#model-selection-and-availability)); a command backend without it keeps the `pricePolicy` behaviour.
+All 10 categories and 7 agents are routed in the example config below. `category:ultrabrain` and `category:deep-high` set `blockNativeTask: false`, so they are routed without intercepting native `task` calls; the top-level `blockNativeTask: "all"` blocks native `task` for every other category and agent target. `freeOnly` routes are checked against the target's live model catalogue; configured candidates are tried in order and an unavailable or paid-only candidate is never silently substituted. That catalogue is the OpenCode model list for `opencode-v2` and the harness's own listing for a command backend with `listModelsArgv` (see [Model selection and availability](#model-selection-and-availability)); a command backend without it keeps the `pricePolicy` behaviour. Routes may also define ordered backend `fallbacks` for foreground work when their catalogue has no usable candidate or every OpenCode candidate is exhausted at runtime.
 
 ### Block policy
 
@@ -84,8 +84,31 @@ Model choice belongs to the target harness, not to OMO. Each route's `models` ar
 - A route may omit `models` to inherit the top-level `defaultModels` chain — the single place to keep the shared ordering (for example the free-model preference list); a per-route `models` array overrides it, and a route with neither fails validation.
 - `freeOnly: true` is the paid guard: a freeOnly route fails loudly instead of falling back to a paid model. Paid models are opt-in per route — list them in `models` on a route without `freeOnly`.
 - A command backend without `listModelsArgv` cannot verify availability or price; its configured list is authoritative and `pricePolicy: "any"` lets freeOnly routes through (unchanged behaviour).
-- Foreground opencode runs fail over to the next candidate when a provider fails at run time (for example a 402 "endpoint unavailable" or an empty reply). An explicit `model` override is never retried elsewhere; background runs report the failure through `miwarang_wait`.
+- A route can opt into cross-backend failover with an ordered `fallbacks` array. Each fallback names a configured `backend` and its own `models` list, and may set `freeOnly`, `pricePolicy`, or `agent` independently.
+- Foreground OpenCode runs fail over to the next candidate when a provider fails at run time (for example a 402 "endpoint unavailable" or an empty reply), then continue through configured fallback backends. An explicit `model` or `backend` override disables fallback. Background runs can select a fallback whose catalogue is already unavailable, but runtime failures are reported through `miwarang_wait` rather than retried silently.
 - A failed model-list probe falls back to the configured candidates so delegations do not break while the harness CLI is unavailable.
+
+Example route with a Command Code fallback:
+
+```json
+{
+  "backend": "opencode",
+  "models": [
+    "opencode/space-bunny-free",
+    "opencode-go/longcat-2.5-preview-free"
+  ],
+  "freeOnly": true,
+  "fallbacks": [
+    {
+      "backend": "commandcode",
+      "models": [
+        "qwen/qwen3.8-max",
+        "moonshotai/kimi-k3"
+      ]
+    }
+  ]
+}
+```
 
 ### Commandcode recipe
 
@@ -133,7 +156,16 @@ The committed example config (`config.example.json`) routes all 10 categories an
         "opencode/space-bunny-free",
         "opencode/mimo-v2.6-flash-free"
       ],
-      "freeOnly": true
+      "freeOnly": true,
+      "fallbacks": [
+        {
+          "backend": "commandcode",
+          "models": [
+            "qwen/qwen3.8-max",
+            "moonshotai/kimi-k3"
+          ]
+        }
+      ]
     },
     "category:unspecified-low": {
       "backend": "opencode",

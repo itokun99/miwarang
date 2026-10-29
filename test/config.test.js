@@ -248,6 +248,55 @@ describe("resolveTargetRoute", () => {
     expect(result.models).toEqual(["opencode/space-bunny-free"]);
   });
 
+  test("normalizes configured fallback backends without changing the primary route", () => {
+    const configWithFallback = {
+      ...qaConfig,
+      routes: {
+        ...qaConfig.routes,
+        "category:quick": {
+          backend: "opencode",
+          models: ["opencode/space-bunny-free"],
+          freeOnly: true,
+          fallbacks: [
+            {
+              backend: "claudeCli",
+              models: ["claude-sonnet-5"],
+            },
+          ],
+        },
+      },
+    };
+
+    const result = resolveTargetRoute(configWithFallback, "category:quick");
+
+    expect(result.backendName).toBe("opencode");
+    expect(result.fallbacks).toHaveLength(1);
+    expect(result.fallbacks[0]).toMatchObject({
+      backendName: "claudeCli",
+      backend: qaBackends.claudeCli,
+      models: ["claude-sonnet-5"],
+      target: "category:quick",
+    });
+  });
+
+  test("backend overrides disable configured fallbacks", () => {
+    const configWithFallback = {
+      ...qaConfig,
+      routes: {
+        ...qaConfig.routes,
+        "category:quick": {
+          backend: "opencode",
+          models: ["opencode/space-bunny-free"],
+          fallbacks: [{ backend: "claudeCli", models: ["claude-sonnet-5"] }],
+        },
+      },
+    };
+
+    expect(
+      resolveTargetRoute(configWithFallback, "category:quick", { backend: "claudeCli" }).fallbacks,
+    ).toEqual([]);
+  });
+
   test("wildcard route resolved with override onto a command backend", () => {
     const result = resolveTargetRoute(qaConfig, "category:anything", {
       backend: "claudeCli",
@@ -324,6 +373,58 @@ describe("validateConfig", () => {
     expect(() => validateConfig({ ...base, blockNativeTask: 7 })).toThrow(
       /blockNativeTask/,
     );
+  });
+
+  test("accepts backend fallback route objects", () => {
+    expect(() =>
+      validateConfig({
+        ...base,
+        backends: {
+          ...base.backends,
+          commandcode: { type: "command", command: "commandcode" },
+        },
+        routes: {
+          "category:quick": {
+            backend: "opencode",
+            models: ["m"],
+            fallbacks: [{ backend: "commandcode", models: ["qwen/model"] }],
+          },
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  test("rejects malformed or nested backend fallbacks", () => {
+    expect(() =>
+      validateConfig({
+        ...base,
+        routes: {
+          "category:quick": {
+            backend: "opencode",
+            models: ["m"],
+            fallbacks: { backend: "opencode", models: ["m"] },
+          },
+        },
+      }),
+    ).toThrow(/fallbacks must be a route object array/);
+    expect(() =>
+      validateConfig({
+        ...base,
+        routes: {
+          "category:quick": {
+            backend: "opencode",
+            models: ["m"],
+            fallbacks: [
+              {
+                backend: "opencode",
+                models: ["m"],
+                fallbacks: [{ backend: "opencode", models: ["m"] }],
+              },
+            ],
+          },
+        },
+      }),
+    ).toThrow(/must not define nested fallbacks/);
   });
 
   test("accepts a known pricePolicy", () => {
