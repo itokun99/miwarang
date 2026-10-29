@@ -1423,4 +1423,115 @@ describe("foreground failover", () => {
     ).rejects.toThrow(/provider\.quota/);
     expect(backend.calls).toHaveLength(1);
   });
+
+  test("provider exhaustion falls back to the configured command backend", async () => {
+    const configWithBackendFallback = {
+      backends: {
+        opencode: { type: "opencode-v2", command: "opencode" },
+        commandcode: { type: "command", command: "commandcode" },
+      },
+      routes: {
+        "category:quick": {
+          backend: "opencode",
+          models: ["opencode/space-bunny-free", "opencode-go/longcat-2.5-preview-free"],
+          freeOnly: true,
+          fallbacks: [
+            {
+              backend: "commandcode",
+              models: ["qwen/qwen3.8-max"],
+            },
+          ],
+        },
+      },
+    };
+    const opencode = flakyBackend({
+      "opencode/space-bunny-free": { error: providerError("ses_1") },
+      "opencode-go/longcat-2.5-preview-free": { error: providerError("ses_2") },
+    });
+    const commandcode = {
+      calls: [],
+      listModels: async () => undefined,
+      runForeground: async (request) => {
+        commandcode.calls.push(["foreground", request]);
+        return { sessionId: "ses_commandcode", text: "Recovered result" };
+      },
+      start: async () => ({ runId: "run_commandcode", state: "running" }),
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const { tools } = makeHarness({
+      config: configWithBackendFallback,
+      backends: { opencode, commandcode },
+    });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:quick",
+      prompt: "Inspect this project",
+    });
+
+    expect(opencode.calls.map((call) => call[1].model)).toEqual([
+      "opencode/space-bunny-free",
+      "opencode-go/longcat-2.5-preview-free",
+    ]);
+    expect(commandcode.calls[0][1].model).toBe("qwen/qwen3.8-max");
+    expect(result.content[0].text).toBe("Recovered result");
+    expect(result.details).toMatchObject({
+      backend: "commandcode",
+      model: "qwen/qwen3.8-max",
+      fallback: true,
+      fallbackIndex: 1,
+    });
+  });
+
+  test("catalogue exhaustion selects a backend fallback before execution", async () => {
+    const configWithBackendFallback = {
+      backends: {
+        opencode: { type: "opencode-v2", command: "opencode" },
+        commandcode: { type: "command", command: "commandcode" },
+      },
+      routes: {
+        "category:quick": {
+          backend: "opencode",
+          models: ["opencode/space-bunny-free"],
+          freeOnly: true,
+          fallbacks: [{ backend: "commandcode", models: ["qwen/qwen3.8-max"] }],
+        },
+      },
+    };
+    const opencode = {
+      calls: [],
+      listModels: async () => [],
+      runForeground: async (request) => {
+        opencode.calls.push(request);
+        throw new Error("should not run");
+      },
+      start: async () => ({ sessionId: "ses_unexpected", state: "running" }),
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const commandcode = {
+      calls: [],
+      listModels: async () => undefined,
+      runForeground: async (request) => {
+        commandcode.calls.push(request);
+        return { sessionId: "ses_commandcode", text: "Catalogue fallback result" };
+      },
+      start: async () => ({ runId: "run_commandcode", state: "running" }),
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const { tools } = makeHarness({
+      config: configWithBackendFallback,
+      backends: { opencode, commandcode },
+    });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:quick",
+      prompt: "Inspect this project",
+    });
+
+    expect(opencode.calls).toHaveLength(0);
+    expect(commandcode.calls[0].model).toBe("qwen/qwen3.8-max");
+    expect(result.details.backend).toBe("commandcode");
+  });
 });

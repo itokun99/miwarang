@@ -21,7 +21,16 @@
         "opencode/space-bunny-free",
         "opencode/mimo-v2.6-flash-free"
       ],
-      "freeOnly": true
+      "freeOnly": true,
+      "fallbacks": [
+        {
+          "backend": "commandcode",
+          "models": [
+            "qwen/qwen3.8-max",
+            "moonshotai/kimi-k3"
+          ]
+        }
+      ]
     },
     "category:unspecified-low": {
       "backend": "opencode",

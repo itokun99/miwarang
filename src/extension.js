@@ -81,6 +81,7 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
       "Use miwarang_wait or miwarang_cancel with the returned session or run ID for background work.",
       "Background delegations are tracked automatically: the session status line lists active runs, /miwarang shows the full table, and a dag watch run renders their progress in /dag.",
       "Model choice belongs to the target harness: omit model so Miwarang selects from the route's configured candidates after checking the live target catalogue (freeOnly routes fail rather than silently fall back to paid). Never forward the OMO session's model name or a model pinned in omo.jsonc; a model outside the target catalogue is rejected.",
+      "Routes may define ordered fallbacks with their own backend and model list. Foreground provider failures may continue through those fallbacks; explicit model or backend overrides disable fallback, and background runtime failures are reported instead of retried silently.",
     ],
     parameters: Type.Object({
       target: Type.String(),
@@ -105,70 +106,100 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         throw new Error(`Backend ${params.backend} is not configured`);
       }
       const resolved = resolveTargetRoute(config, target, { backend: params.backend });
-      const backendId = resolved.backendName;
-      const backend = backends[backendId];
-      if (!backend) throw new Error(`Backend ${backendId} is not configured`);
-
-      const liveModels =
-        resolved.backend.type === "opencode-v2"
-          ? await backend.listModels()
-          : ((await backend.listModels?.()) ?? configuredCommandModels(resolved, params.model));
-      const routeWith = (models) => ({
+      const candidates = [resolved, ...(resolved.fallbacks ?? [])];
+      const routeWith = (candidate, models) => ({
         ...config,
-        routes: { ...config.routes, [target]: modelSelectionRoute(resolved, models) },
+        routes: { [target]: modelSelectionRoute(candidate, models) },
       });
-      let route = resolveRoute(routeWith(), target, liveModels, {
-        model: params.model,
-        agent: params.agent,
-      });
+      const selectCandidate = async (startIndex) => {
+        let lastError;
+        for (let index = startIndex; index < candidates.length; index += 1) {
+          const candidate = candidates[index];
+          const backend = backends[candidate.backendName];
+          if (!backend) throw new Error(`Backend ${candidate.backendName} is not configured`);
+
+          const liveModels =
+            candidate.backend.type === "opencode-v2"
+              ? await backend.listModels()
+              : ((await backend.listModels?.()) ??
+                configuredCommandModels(candidate, index === 0 ? params.model : undefined));
+          try {
+            const route = resolveRoute(routeWith(candidate), target, liveModels, {
+              model: index === 0 ? params.model : undefined,
+              agent: params.agent,
+            });
+            return {
+              backend,
+              backendId: candidate.backendName,
+              candidate,
+              index,
+              liveModels,
+              route,
+            };
+          } catch (error) {
+            if (
+              !isModelAvailabilityFailure(error) ||
+              (index === 0 && params.model !== undefined)
+            ) {
+              throw error;
+            }
+            lastError = error;
+          }
+        }
+        return { error: lastError };
+      };
+
+      const firstSelection = await selectCandidate(0);
+      if (!firstSelection.route) throw firstSelection.error;
+      let selected = firstSelection;
       const requestFor = (model) => ({
         cwd: params.cwd ?? ctx?.cwd ?? pi.cwd ?? process.cwd(),
         target,
         model,
-        agent: route.agent,
+        agent: selected.route.agent,
         prompt: params.prompt,
       });
       // A run-time provider failure (for example a 402 "endpoint
       // unavailable") is invisible to the catalogue check, so foreground
-      // opencode runs continue down the configured candidates until one
-      // produces text. An explicit model override is honoured as-is, and
-      // background runs report the failure through miwarang_wait instead of
-      // retrying silently.
-      const nextCandidateAfterFailure = (error, tried) => {
-        if (params.model !== undefined) return undefined;
-        if (resolved.backend.type !== "opencode-v2") return undefined;
-        if (
-          !/^OpenCode session \S+ (?:failed:|returned no assistant text)/.test(
-            String(error?.message),
-          )
-        ) {
-          return undefined;
-        }
-        const remaining = resolved.models.filter((model) => !tried.includes(model));
-        if (!remaining.length) return undefined;
-        try {
-          return resolveRoute(routeWith(remaining), target, liveModels, {
-            agent: params.agent,
-          });
-        } catch {
-          return undefined;
-        }
-      };
+      // opencode runs continue down the configured candidates and then any
+      // explicitly configured fallback backends until one produces text. An
+      // explicit model override is honoured as-is, and background runs report
+      // the failure through miwarang_wait instead of retrying silently.
       const mode = params.mode ?? "foreground";
       let result;
       if (mode === "background") {
-        result = await backend.start(requestFor(route.model));
+        result = await selected.backend.start(requestFor(selected.route.model));
       } else {
         const tried = [];
         for (;;) {
           try {
-            result = await backend.runForeground(requestFor(route.model));
+            result = await selected.backend.runForeground(requestFor(selected.route.model));
             break;
           } catch (error) {
-            tried.push(route.model);
-            const next = nextCandidateAfterFailure(error, tried);
-            if (!next) throw error;
-            route = next;
+            tried.push(selected.route.model);
+            if (params.model !== undefined || !isProviderFailure(selected.candidate, error)) {
+              throw error;
+            }
+            const remaining = selected.candidate.models.filter(
+              (model) => !tried.includes(model),
+            );
+            if (remaining.length) {
+              try {
+                selected = {
+                  ...selected,
+                  route: resolveRoute(routeWith(selected.candidate, remaining), target, selected.liveModels, {
+                    agent: params.agent,
+                  }),
+                };
+                continue;
+              } catch {
+                // The live catalogue can change between selection and execution.
+              }
+            }
+            const next = await selectCandidate(selected.index + 1);
+            if (!next.route) throw error;
+            selected = next;
+            tried.length = 0;
           }
         }
       }
@@ -178,8 +209,8 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         const id = result.sessionId ?? result.runId;
         tracker.track({
           id,
-          backend: backendId,
-          backendType: resolved.backend.type,
+          backend: selected.backendId,
+          backendType: selected.candidate.backend.type,
           target,
           startedAt: Date.now(),
         });
@@ -187,7 +218,7 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         const watch = dagWatch.enabled
           ? await startWatchDag(ctx, {
               id,
-              backendType: resolved.backend.type,
+              backendType: selected.candidate.backend.type,
               target,
               runsDirectory: store.directory,
               watch: dagWatch,
@@ -200,10 +231,13 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
           content: [{ type: "text", text }],
           details: {
             ...result,
-            backend: backendId,
+            backend: selected.backendId,
             resolvedVia: resolvedViaValue,
-            model: route.model,
+            model: selected.route.model,
             target,
+            ...(selected.index > 0
+              ? { fallback: true, fallbackIndex: selected.index }
+              : {}),
             ...(watch ? { dagWatch: watch } : {}),
           },
         };
@@ -212,10 +246,11 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         content: [{ type: "text", text: result.text }],
         details: {
           sessionId: result.sessionId,
-          backend: backendId,
+          backend: selected.backendId,
           resolvedVia: resolvedViaValue,
-          model: route.model,
+          model: selected.route.model,
           target,
+          ...(selected.index > 0 ? { fallback: true, fallbackIndex: selected.index } : {}),
         },
       };
     },
@@ -369,6 +404,21 @@ function resolvedVia(key, target) {
   if (key === "defaultRoute") return "default";
   if (key === target) return "exact";
   return "wildcard";
+}
+
+function isModelAvailabilityFailure(error) {
+  return /^(?:No available free model is configured for|No configured model is available for)/.test(
+    String(error?.message ?? error),
+  );
+}
+
+function isProviderFailure(candidate, error) {
+  return (
+    candidate.backend?.type === "opencode-v2" &&
+    /^OpenCode session \S+ (?:failed:|returned no assistant text)/.test(
+      String(error?.message ?? error),
+    )
+  );
 }
 
 // Fallback catalogue for command backends without a listModelsArgv probe, or
