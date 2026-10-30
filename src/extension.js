@@ -162,13 +162,44 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
       // Runtime provider or quota failures are invisible to the catalogue
       // check, so foreground runs continue down the configured candidates
       // and then any explicitly configured fallback backends until one
-      // produces text. An explicit model override is honoured as-is, and
-      // background runs report the failure through miwarang_wait instead of
-      // retrying silently.
+      // produces text. Background start failures can use the same chain
+      // until a run ID is created; failures after a run ID exists are
+      // reported through miwarang_wait instead of retried silently.
       const mode = params.mode ?? "foreground";
       let result;
       if (mode === "background") {
-        result = await selected.backend.start(requestFor(selected.route.model));
+        const tried = [];
+        for (;;) {
+          try {
+            result = await selected.backend.start(requestFor(selected.route.model));
+            break;
+          } catch (error) {
+            tried.push(selected.route.model);
+            if (params.model !== undefined || !isProviderFailure(selected.candidate, error)) {
+              throw error;
+            }
+            const remaining = selected.candidate.models.filter(
+              (model) => !tried.includes(model),
+            );
+            if (remaining.length) {
+              try {
+                selected = {
+                  ...selected,
+                  route: resolveRoute(routeWith(selected.candidate, remaining), target, selected.liveModels, {
+                    agent: params.agent,
+                  }),
+                };
+                continue;
+              } catch {
+                // The live catalogue can change between selection and execution.
+              }
+            }
+            const next = await selectCandidate(selected.index + 1);
+            if (!next.route) throw error;
+            selected = next;
+            tried.length = 0;
+          }
+        }
       } else {
         const tried = [];
         for (;;) {
@@ -415,7 +446,10 @@ function isModelAvailabilityFailure(error) {
 function isProviderFailure(candidate, error) {
   const message = String(error?.message ?? error);
   if (candidate.backend?.type === "opencode-v2") {
-    return /^OpenCode session \S+ (?:failed:|returned no assistant text)/.test(message);
+    return (
+      /^OpenCode session \S+ (?:failed:|returned no assistant text)/.test(message) ||
+      /^OpenCode API \S+ \S+ failed \(exit \d+\)/.test(message)
+    );
   }
   if (candidate.backend?.type !== "command") return false;
   return /(?:quota|rate limit|usage limit|5-hour|weekly limit|credits exhausted|429)/i.test(

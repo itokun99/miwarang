@@ -1399,18 +1399,18 @@ describe("foreground failover", () => {
 
   test("non-provider failures do not trigger failover", async () => {
     const backend = flakyBackend({
-      "opencode/space-bunny-free": { error: "OpenCode API POST /api/session failed (exit 1)" },
+      "opencode/space-bunny-free": { error: "OpenCode configuration rejected the request" },
       "opencode-go/longcat-2.5-preview-free": { text: "should not run" },
     });
     const { tools } = makeHarness({ config: failoverConfig, backends: { opencode: backend } });
 
     await expect(
       invoke(tools.get("miwarang_delegate"), { target: "category:quick", prompt: "Inspect" }),
-    ).rejects.toThrow(/POST \/api\/session/);
+    ).rejects.toThrow(/configuration rejected/);
     expect(backend.calls).toHaveLength(1);
   });
 
-  test("background runs do not fail over", async () => {
+  test("background start failures exhaust configured models before surfacing", async () => {
     const backend = flakyBackend({ startError: providerError("ses_1") });
     const { tools } = makeHarness({ config: failoverConfig, backends: { opencode: backend } });
 
@@ -1421,7 +1421,7 @@ describe("foreground failover", () => {
         mode: "background",
       }),
     ).rejects.toThrow(/provider\.quota/);
-    expect(backend.calls).toHaveLength(1);
+    expect(backend.calls).toHaveLength(2);
   });
 
   test("provider exhaustion falls back to the configured command backend", async () => {
@@ -1547,6 +1547,78 @@ describe("foreground failover", () => {
       backend: "commandcode",
       model: "deepseek/deepseek-v4-flash",
       fallback: true,
+    });
+  });
+
+  test("background start failure falls back before returning a run ID", async () => {
+    const configWithBackendFallback = {
+      backends: {
+        opencode: { type: "opencode-v2", command: "opencode" },
+        commandcode: { type: "command", command: "commandcode" },
+      },
+      routes: {
+        "category:deep-high": {
+          backend: "opencode",
+          models: ["opencode/deepseek-v4.1-flash-free"],
+          freeOnly: true,
+          fallbacks: [
+            {
+              backend: "commandcode",
+              models: ["reflection/beam:free"],
+            },
+          ],
+        },
+      },
+    };
+    const opencode = {
+      listModels: async () => [
+        {
+          providerID: "opencode",
+          id: "deepseek-v4.1-flash-free",
+          cost: { input: 0, output: 0 },
+        },
+      ],
+      start: async () => {
+        throw new Error(
+          "OpenCode API POST /api/session/ses_test/prompt failed (exit 1)",
+        );
+      },
+      runForeground: async () => {
+        throw new Error("should not run foreground");
+      },
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const commandcode = {
+      calls: [],
+      listModels: async () => undefined,
+      start: async (request) => {
+        commandcode.calls.push(request);
+        return { runId: "run_commandcode", state: "running" };
+      },
+      runForeground: async () => {
+        throw new Error("should not run foreground");
+      },
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const { tools } = makeHarness({
+      config: configWithBackendFallback,
+      backends: { opencode, commandcode },
+    });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:deep-high",
+      prompt: "Inspect this project",
+      mode: "background",
+    });
+
+    expect(commandcode.calls[0].model).toBe("reflection/beam:free");
+    expect(result.details).toMatchObject({
+      backend: "commandcode",
+      model: "reflection/beam:free",
+      fallback: true,
+      fallbackIndex: 1,
     });
   });
 
