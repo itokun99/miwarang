@@ -115,7 +115,8 @@ describe("resolveRoute", () => {
     expect(() =>
       resolveRoute(config, "category:quick", liveModels, { model: "cloviela/glm-5.3-flash" }),
     ).toThrow(
-      "Requested model cloviela/glm-5.3-flash is not in the live model catalog (catalog: 3 models)",
+      "Requested model cloviela/glm-5.3-flash is not in the live model catalog (catalog: 3 models). " +
+        "Omit the model override",
     );
   });
 
@@ -246,6 +247,36 @@ describe("resolveTargetRoute", () => {
     expect(result.backendName).toBe("claudeCli");
     expect(result.backend.type).toBe("command");
     expect(result.models).toEqual(["opencode/space-bunny-free"]);
+  });
+
+  test("backend override uses the matching fallback model list", () => {
+    const configWithFallback = {
+      ...qaConfig,
+      routes: {
+        ...qaConfig.routes,
+        "category:quick": {
+          backend: "opencode",
+          models: ["opencode/space-bunny-free"],
+          freeOnly: true,
+          fallbacks: [
+            {
+              backend: "claudeCli",
+              models: ["claude-haiku-5"],
+            },
+          ],
+        },
+      },
+    };
+
+    const result = resolveTargetRoute(configWithFallback, "category:quick", {
+      backend: "claudeCli",
+    });
+
+    expect(result.backendName).toBe("claudeCli");
+    expect(result.backend).toEqual(qaBackends.claudeCli);
+    expect(result.models).toEqual(["claude-haiku-5"]);
+    expect(result.freeOnly).toBeUndefined();
+    expect(result.fallbacks).toEqual([]);
   });
 
   test("normalizes configured fallback backends without changing the primary route", () => {

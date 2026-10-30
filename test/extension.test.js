@@ -187,7 +187,7 @@ describe("Senpi extension", () => {
     expect(guidance).toContain("category:*");
     expect(guidance).toContain("defaultRoute");
     expect(guidance).toContain("omo.jsonc");
-    expect(guidance).toContain("Never forward the OMO session's model name");
+    expect(guidance).toContain("OMO configuration supplies intent/category only");
   });
 
   test("dispatches foreground work to the configured backend and model", async () => {
@@ -1399,18 +1399,18 @@ describe("foreground failover", () => {
 
   test("non-provider failures do not trigger failover", async () => {
     const backend = flakyBackend({
-      "opencode/space-bunny-free": { error: "OpenCode API POST /api/session failed (exit 1)" },
+      "opencode/space-bunny-free": { error: "OpenCode configuration rejected the request" },
       "opencode-go/longcat-2.5-preview-free": { text: "should not run" },
     });
     const { tools } = makeHarness({ config: failoverConfig, backends: { opencode: backend } });
 
     await expect(
       invoke(tools.get("miwarang_delegate"), { target: "category:quick", prompt: "Inspect" }),
-    ).rejects.toThrow(/POST \/api\/session/);
+    ).rejects.toThrow(/configuration rejected/);
     expect(backend.calls).toHaveLength(1);
   });
 
-  test("background runs do not fail over", async () => {
+  test("background start failures exhaust configured models before surfacing", async () => {
     const backend = flakyBackend({ startError: providerError("ses_1") });
     const { tools } = makeHarness({ config: failoverConfig, backends: { opencode: backend } });
 
@@ -1421,7 +1421,7 @@ describe("foreground failover", () => {
         mode: "background",
       }),
     ).rejects.toThrow(/provider\.quota/);
-    expect(backend.calls).toHaveLength(1);
+    expect(backend.calls).toHaveLength(2);
   });
 
   test("provider exhaustion falls back to the configured command backend", async () => {
@@ -1478,6 +1478,145 @@ describe("foreground failover", () => {
     expect(result.details).toMatchObject({
       backend: "commandcode",
       model: "qwen/qwen3.8-max",
+      fallback: true,
+      fallbackIndex: 1,
+    });
+  });
+
+  test("commandcode quota exhaustion advances from free to cheap models", async () => {
+    const configWithCheapFallback = {
+      backends: {
+        opencode: { type: "opencode-v2", command: "opencode" },
+        commandcode: { type: "command", command: "commandcode" },
+      },
+      routes: {
+        "category:quick": {
+          backend: "opencode",
+          models: ["opencode/space-bunny-free"],
+          freeOnly: true,
+          fallbacks: [
+            {
+              backend: "commandcode",
+              models: ["reflection/beam:free", "deepseek/deepseek-v4-flash"],
+            },
+          ],
+        },
+      },
+    };
+    const opencode = {
+      listModels: async () => liveModels,
+      runForeground: async () => {
+        throw new Error(providerError("ses_opencode"));
+      },
+      start: async () => ({ sessionId: "ses_opencode", state: "running" }),
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const commandcode = {
+      calls: [],
+      listModels: async () => undefined,
+      runForeground: async (request) => {
+        commandcode.calls.push(request);
+        if (commandcode.calls.length === 1) {
+          throw new Error(
+            "Configured command failed with exit code 1: You've reached your 5-hour usage limit",
+          );
+        }
+        return { sessionId: "ses_commandcode", text: "Cheap model result" };
+      },
+      start: async () => ({ runId: "run_commandcode", state: "running" }),
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const { tools } = makeHarness({
+      config: configWithCheapFallback,
+      backends: { opencode, commandcode },
+    });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:quick",
+      prompt: "Inspect this project",
+    });
+
+    expect(commandcode.calls.map((request) => request.model)).toEqual([
+      "reflection/beam:free",
+      "deepseek/deepseek-v4-flash",
+    ]);
+    expect(result.content[0].text).toBe("Cheap model result");
+    expect(result.details).toMatchObject({
+      backend: "commandcode",
+      model: "deepseek/deepseek-v4-flash",
+      fallback: true,
+    });
+  });
+
+  test("background start failure falls back before returning a run ID", async () => {
+    const configWithBackendFallback = {
+      backends: {
+        opencode: { type: "opencode-v2", command: "opencode" },
+        commandcode: { type: "command", command: "commandcode" },
+      },
+      routes: {
+        "category:deep-high": {
+          backend: "opencode",
+          models: ["opencode/deepseek-v4.1-flash-free"],
+          freeOnly: true,
+          fallbacks: [
+            {
+              backend: "commandcode",
+              models: ["reflection/beam:free"],
+            },
+          ],
+        },
+      },
+    };
+    const opencode = {
+      listModels: async () => [
+        {
+          providerID: "opencode",
+          id: "deepseek-v4.1-flash-free",
+          cost: { input: 0, output: 0 },
+        },
+      ],
+      start: async () => {
+        throw new Error(
+          "OpenCode API POST /api/session/ses_test/prompt failed (exit 1)",
+        );
+      },
+      runForeground: async () => {
+        throw new Error("should not run foreground");
+      },
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const commandcode = {
+      calls: [],
+      listModels: async () => undefined,
+      start: async (request) => {
+        commandcode.calls.push(request);
+        return { runId: "run_commandcode", state: "running" };
+      },
+      runForeground: async () => {
+        throw new Error("should not run foreground");
+      },
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const { tools } = makeHarness({
+      config: configWithBackendFallback,
+      backends: { opencode, commandcode },
+    });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:deep-high",
+      prompt: "Inspect this project",
+      mode: "background",
+    });
+
+    expect(commandcode.calls[0].model).toBe("reflection/beam:free");
+    expect(result.details).toMatchObject({
+      backend: "commandcode",
+      model: "reflection/beam:free",
       fallback: true,
       fallbackIndex: 1,
     });

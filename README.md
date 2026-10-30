@@ -83,12 +83,13 @@ Model choice belongs to the target harness, not to OMO. Each route's `models` ar
 - Candidates are checked in order against the target's live catalogue: the OpenCode model catalogue for `opencode-v2` backends, or the command backend's own listing when `listModelsArgv` is configured (for example `["--list-models"]` for commandcode, whose `:free`/`-free` ids count as free). The first available candidate wins; unavailable candidates are skipped, never forwarded.
 - A route may omit `models` to inherit the top-level `defaultModels` chain — the single place to keep the shared ordering (for example the free-model preference list); a per-route `models` array overrides it, and a route with neither fails validation.
 - `freeOnly: true` is the paid guard: a freeOnly route fails loudly instead of falling back to a paid model. Paid models are opt-in per route — list them in `models` on a route without `freeOnly`.
+- A mixed fallback chain should list free models first, followed by an explicit allowlist of low-cost paid models. Do not set `freeOnly` on that mixed fallback route, or the paid candidates will be rejected; no model outside the list is selected.
 - A command backend without `listModelsArgv` cannot verify availability or price; its configured list is authoritative and `pricePolicy: "any"` lets freeOnly routes through (unchanged behaviour).
 - A route can opt into cross-backend failover with an ordered `fallbacks` array. Each fallback names a configured `backend` and its own `models` list, and may set `freeOnly`, `pricePolicy`, or `agent` independently.
-- Foreground OpenCode runs fail over to the next candidate when a provider fails at run time (for example a 402 "endpoint unavailable" or an empty reply), then continue through configured fallback backends. An explicit `model` or `backend` override disables fallback. Background runs can select a fallback whose catalogue is already unavailable, but runtime failures are reported through `miwarang_wait` rather than retried silently.
+- Foreground OpenCode runs fail over to the next candidate when a provider fails at run time (for example a 402 "endpoint unavailable" or an empty reply), then continue through configured fallback backends. Command backends also advance through the chain for quota, rate-limit, credit, 5-hour, weekly-limit, and HTTP 429 errors. An explicit `model` or `backend` override disables fallback. Background runs can select a fallback whose catalogue is already unavailable, but runtime failures are reported through `miwarang_wait` rather than retried silently.
 - A failed model-list probe falls back to the configured candidates so delegations do not break while the harness CLI is unavailable.
 
-Example route with a Command Code fallback:
+Example route with a Command Code free-first, low-cost fallback:
 
 ```json
 {
@@ -102,8 +103,12 @@ Example route with a Command Code fallback:
     {
       "backend": "commandcode",
       "models": [
-        "qwen/qwen3.8-max",
-        "moonshotai/kimi-k3"
+        "reflection/beam:free",
+        "poolside/laguna-s-2.1-free",
+        "stealth/glyph-cluster:free",
+        "deepseek/deepseek-v4-flash",
+        "qwen/qwen3.8-flash",
+        "qwen/qwen3.7-flash"
       ]
     }
   ]
@@ -161,8 +166,12 @@ The committed example config (`config.example.json`) routes all 10 categories an
         {
           "backend": "commandcode",
           "models": [
-            "qwen/qwen3.8-max",
-            "moonshotai/kimi-k3"
+            "reflection/beam:free",
+            "poolside/laguna-s-2.1-free",
+            "stealth/glyph-cluster:free",
+            "deepseek/deepseek-v4-flash",
+            "qwen/qwen3.8-flash",
+            "qwen/qwen3.7-flash"
           ]
         }
       ]
@@ -194,8 +203,12 @@ The committed example config (`config.example.json`) routes all 10 categories an
     "category:writing": {
       "backend": "commandcode",
       "models": [
-        "qwen/qwen3.8-max",
-        "moonshotai/kimi-k3"
+        "reflection/beam:free",
+        "poolside/laguna-s-2.1-free",
+        "stealth/glyph-cluster:free",
+        "deepseek/deepseek-v4-flash",
+        "qwen/qwen3.8-flash",
+        "qwen/qwen3.7-flash"
       ]
     },
     "category:artistry": {

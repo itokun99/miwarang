@@ -22,7 +22,8 @@ export function resolveRoute(config, target, liveModels, overrides = {}) {
       if (overrides.model) {
         throw new Error(
           `Requested model ${modelId} is not in the live model catalog ` +
-            `(catalog: ${liveModels.length} models)`,
+            `(catalog: ${liveModels.length} models). Omit the model override and ` +
+            "let Miwarang select a live model for the target backend.",
         );
       }
       continue;
@@ -94,7 +95,13 @@ export function resolveTargetRoute(config, target, { backend } = {}) {
   }
   if (!route) throw new Error(`No route configured for ${target}`);
 
-  const backendName = backend ?? route.backend;
+  const backendRoute =
+    backend === undefined || route.backend === backend
+      ? route
+      : (Array.isArray(route.fallbacks)
+          ? route.fallbacks.find((fallback) => fallback?.backend === backend)
+          : undefined) ?? route;
+  const backendName = backend ?? backendRoute.backend;
   const backendObj = config?.backends?.[backendName];
   if (!backendObj) {
     throw new Error(`Backend ${backendName} configured for ${target} does not exist`);
@@ -103,12 +110,12 @@ export function resolveTargetRoute(config, target, { backend } = {}) {
     backend === undefined ? resolveFallbackRoutes(config, route, target, key) : [];
 
   return {
-    ...route,
+    ...backendRoute,
     backend: backendObj,
     backendName,
     target,
     key,
-    models: route.models ?? config?.defaultModels ?? [],
+    models: backendRoute.models ?? config?.defaultModels ?? [],
     fallbacks,
   };
 }
