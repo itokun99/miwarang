@@ -187,7 +187,7 @@ describe("Senpi extension", () => {
     expect(guidance).toContain("category:*");
     expect(guidance).toContain("defaultRoute");
     expect(guidance).toContain("omo.jsonc");
-    expect(guidance).toContain("Never forward the OMO session's model name");
+    expect(guidance).toContain("OMO configuration supplies intent/category only");
   });
 
   test("dispatches foreground work to the configured backend and model", async () => {
@@ -1480,6 +1480,73 @@ describe("foreground failover", () => {
       model: "qwen/qwen3.8-max",
       fallback: true,
       fallbackIndex: 1,
+    });
+  });
+
+  test("commandcode quota exhaustion advances from free to cheap models", async () => {
+    const configWithCheapFallback = {
+      backends: {
+        opencode: { type: "opencode-v2", command: "opencode" },
+        commandcode: { type: "command", command: "commandcode" },
+      },
+      routes: {
+        "category:quick": {
+          backend: "opencode",
+          models: ["opencode/space-bunny-free"],
+          freeOnly: true,
+          fallbacks: [
+            {
+              backend: "commandcode",
+              models: ["reflection/beam:free", "deepseek/deepseek-v4-flash"],
+            },
+          ],
+        },
+      },
+    };
+    const opencode = {
+      listModels: async () => liveModels,
+      runForeground: async () => {
+        throw new Error(providerError("ses_opencode"));
+      },
+      start: async () => ({ sessionId: "ses_opencode", state: "running" }),
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const commandcode = {
+      calls: [],
+      listModels: async () => undefined,
+      runForeground: async (request) => {
+        commandcode.calls.push(request);
+        if (commandcode.calls.length === 1) {
+          throw new Error(
+            "Configured command failed with exit code 1: You've reached your 5-hour usage limit",
+          );
+        }
+        return { sessionId: "ses_commandcode", text: "Cheap model result" };
+      },
+      start: async () => ({ runId: "run_commandcode", state: "running" }),
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const { tools } = makeHarness({
+      config: configWithCheapFallback,
+      backends: { opencode, commandcode },
+    });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "category:quick",
+      prompt: "Inspect this project",
+    });
+
+    expect(commandcode.calls.map((request) => request.model)).toEqual([
+      "reflection/beam:free",
+      "deepseek/deepseek-v4-flash",
+    ]);
+    expect(result.content[0].text).toBe("Cheap model result");
+    expect(result.details).toMatchObject({
+      backend: "commandcode",
+      model: "deepseek/deepseek-v4-flash",
+      fallback: true,
     });
   });
 

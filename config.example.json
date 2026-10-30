@@ -26,8 +26,12 @@
         {
           "backend": "commandcode",
           "models": [
-            "qwen/qwen3.8-max",
-            "moonshotai/kimi-k3"
+            "reflection/beam:free",
+            "poolside/laguna-s-2.1-free",
+            "stealth/glyph-cluster:free",
+            "deepseek/deepseek-v4-flash",
+            "qwen/qwen3.8-flash",
+            "qwen/qwen3.7-flash"
           ]
         }
       ]
@@ -59,8 +63,12 @@
     "category:writing": {
       "backend": "commandcode",
       "models": [
-        "qwen/qwen3.8-max",
-        "moonshotai/kimi-k3"
+        "reflection/beam:free",
+        "poolside/laguna-s-2.1-free",
+        "stealth/glyph-cluster:free",
+        "deepseek/deepseek-v4-flash",
+        "qwen/qwen3.8-flash",
+        "qwen/qwen3.7-flash"
       ]
     },
     "category:artistry": {
