@@ -656,35 +656,3 @@ describe("defaultModels inheritance", () => {
     ]);
   });
 });
-
-describe("dagWatch validation", () => {
-  const baseConfig = {
-    backends: { opencode: { type: "opencode-v2", command: "opencode" } },
-    routes: { "category:quick": { backend: "opencode", models: ["opencode/space-bunny-free"] } },
-  };
-
-  test("accepts false, true and an object of knobs", () => {
-    expect(() => validateConfig({ ...baseConfig, dagWatch: false })).not.toThrow();
-    expect(() => validateConfig({ ...baseConfig, dagWatch: true })).not.toThrow();
-    expect(() =>
-      validateConfig({
-        ...baseConfig,
-        dagWatch: { category: "unspecified-low", pollSeconds: 5, timeoutMinutes: 10 },
-      }),
-    ).not.toThrow();
-  });
-
-  test("rejects malformed values", () => {
-    expect(() => validateConfig({ ...baseConfig, dagWatch: "yes" })).toThrow(/dagWatch/);
-    expect(() => validateConfig({ ...baseConfig, dagWatch: [] })).toThrow(/dagWatch/);
-    expect(() => validateConfig({ ...baseConfig, dagWatch: { category: "" } })).toThrow(
-      /dagWatch\.category/,
-    );
-    expect(() => validateConfig({ ...baseConfig, dagWatch: { pollSeconds: 0 } })).toThrow(
-      /dagWatch\.pollSeconds/,
-    );
-    expect(() => validateConfig({ ...baseConfig, dagWatch: { timeoutMinutes: -1 } })).toThrow(
-      /dagWatch\.timeoutMinutes/,
-    );
-  });
-});

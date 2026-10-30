@@ -6,15 +6,10 @@ import { createCommandBackend } from "./backends/command.js";
 import { createOpenCodeBackend } from "./backends/opencode.js";
 import { RunStore } from "./runs/store.js";
 import {
-  buildEvalCode,
-  buildWatchDefinition,
   createRunTracker,
   formatRunTable,
   formatStatusLine,
   isTerminalState,
-  normalizeDagWatch,
-  parseWatchRunId,
-  shortId,
 } from "./watch.js";
 
 // How often the footer status line re-reads command run records while a run is
@@ -32,7 +27,6 @@ export default async function miwarangExtension(pi) {
 export function setupExtension(pi, { config, backends: injectedBackends, runStore, timers } = {}) {
   const store = runStore ?? new RunStore({ directory: config.runsDirectory });
   const backends = injectedBackends ?? createBackends(config, store);
-  const dagWatch = normalizeDagWatch(config.dagWatch);
   const tracker = createRunTracker({
     readCommandState: async (id) => (await store.get(id))?.state,
   });
@@ -79,7 +73,7 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         "category:* or agent:* wildcard, then defaultRoute. Pass the full target " +
         "prefix, preserve the task prompt, and map run_in_background to mode background.",
       "Use miwarang_wait or miwarang_cancel with the returned session or run ID for background work.",
-      "Background delegations are tracked automatically: the session status line lists active runs, /miwarang shows the full table, and a dag watch run renders their progress in /dag.",
+      "Background delegations are tracked automatically: the session status line lists active runs, /miwarang shows the full table, and miwarang_wait returns the terminal result.",
       "OMO configuration supplies intent/category only. Never copy a model or backend from omo.jsonc or the OMO session. Omit model and backend so Miwarang probes the selected harness's live catalogue and resolves the configured route/fallback chain.",
       "Routes may define ordered fallbacks with their own backend and model list. Omit backend to let Miwarang choose a configured fallback with the correct harness-specific models; pass backend only for an intentional user-required override. Foreground provider failures may continue through fallbacks, and background runtime failures are reported instead of retried silently.",
     ],
@@ -246,18 +240,7 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
           startedAt: Date.now(),
         });
         syncStatus(ctx);
-        const watch = dagWatch.enabled
-          ? await startWatchDag(ctx, {
-              id,
-              backendType: selected.candidate.backend.type,
-              target,
-              runsDirectory: store.directory,
-              watch: dagWatch,
-            })
-          : undefined;
         let text = `Started ${target} in background (${id}).`;
-        if (watch?.runId) text += ` Dag watch: ${watch.runId}.`;
-        if (watch?.error) text += ` Dag watch unavailable: ${watch.error}.`;
         return {
           content: [{ type: "text", text }],
           details: {
@@ -269,7 +252,6 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
             ...(selected.index > 0
               ? { fallback: true, fallbackIndex: selected.index }
               : {}),
-            ...(watch ? { dagWatch: watch } : {}),
           },
         };
       }
@@ -369,31 +351,6 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
 }
 
 // The dag `workflow` tool is exposure-hidden from model calls, and a plain
-// ctx.executeTool("workflow", ...) cannot reach it ("Tool workflow not found",
-// verified 2026-10-20); the eval kernel's `tool` proxy can, so the watch
-// bridge runs one eval cell and reads the run back from the cell output.
-// Runs created here are ordinary dag runs: /dag, the status widget, and any
-// dag pane (for example omo-tmux-dag) render them like any other run.
-async function startWatchDag(ctx, { id, backendType, target, runsDirectory, watch }) {
-  if (typeof ctx?.executeTool !== "function") {
-    return { error: "this host does not offer ctx.executeTool" };
-  }
-  const definition = buildWatchDefinition({ id, backendType, target, runsDirectory, watch });
-  try {
-    const response = await ctx.executeTool("eval", {
-      action: "run",
-      language: "js",
-      summary: `miwarang dag watch ${shortId(id)}`,
-      code: buildEvalCode(definition),
-    });
-    const text = response?.content?.[0]?.text ?? "";
-    const runId = parseWatchRunId(text);
-    return runId ? { runId } : { error: "the dag start returned no run id" };
-  } catch (error) {
-    return { error: String(error?.message ?? error) };
-  }
-}
-
 function createBackends(config, store = new RunStore({ directory: config.runsDirectory })) {
   const backends = {};
   for (const [id, backend] of Object.entries(config.backends)) {

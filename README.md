@@ -326,7 +326,6 @@ The committed example config (`config.example.json`) routes all 10 categories an
     "freeOnly": true
   },
   "blockNativeTask": "all",
-  "dagWatch": { "category": "quick" },
   "runsDirectory": "~/.local/state/miwarang/runs"
 }
 ```
@@ -344,30 +343,19 @@ Foreground execution waits and returns the final assistant text. Background exec
 
 OpenCode operations use the authenticated `opencode api` CLI. The extension does not store OpenCode credentials or construct OpenCode-specific request headers.
 
-## Watching background runs
+## Tracking background runs
 
-Every background delegation is tracked in the session:
+Background runs are tracked directly by Miwarang without creating child OMO or
+DAG watcher processes:
 
-- The TUI footer status line shows the active runs and their runtime.
-- `/miwarang` lists every tracked run with its state, elapsed time, and target.
-- Under OMO sessions a **dag watch run** starts automatically: one
-  category-routed watcher node polls the delegated run until it settles, so its
-  progress renders in the `/dag` view, the TUI status widget, and any dag pane
-  (for example `omo-tmux-dag`). The `miwarang_delegate` result reports the watch
-  run ID, or why the watch could not start.
+- The TUI footer status line shows active runs and runtime.
+- `/miwarang` lists tracked runs with state, elapsed time, and target.
+- `miwarang_wait` retrieves a terminal result by the returned `sessionId` or
+  `runId`.
+- `miwarang_cancel` requests cancellation using that same identifier.
 
-The bridge is best-effort and never fails the delegation. Configure it with the top-level `dagWatch` key:
-
-```json
-{
-  "dagWatch": { "category": "quick", "pollSeconds": 30, "timeoutMinutes": 60 }
-}
-```
-
-- `false` disables the watch bridge entirely.
-- `category` picks the watcher node's category route (default `quick`).
-- `pollSeconds` sets the watcher's polling interval (default `30`).
-- `timeoutMinutes` bounds the watch (default `60`).
+The main agent can start multiple background delegations and wait for each
+returned ID. There is no separate DAG watch process to become orphaned.
 
 ## Configuring other CLI agents
 
