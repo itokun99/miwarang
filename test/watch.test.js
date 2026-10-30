@@ -1,121 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import {
-  buildEvalCode,
-  buildWatchDefinition,
   createRunTracker,
   formatElapsed,
   formatRunTable,
   formatStatusLine,
-  normalizeDagWatch,
-  parseWatchRunId,
+  isTerminalState,
   shortId,
 } from "../src/watch.js";
 
 const RUN_ID = "run_11111111-1111-1111-1111-111111111111";
 const SES_ID = "ses_22222222-2222-2222-2222-222222222222";
-const DAG_ID = "dag_33333333-4444-5555-6666-777777777777";
 
-describe("normalizeDagWatch", () => {
-  test("defaults when unset or true", () => {
-    expect(normalizeDagWatch(undefined)).toEqual({
-      enabled: true,
-      category: "quick",
-      pollSeconds: 30,
-      timeoutMinutes: 60,
-    });
-    expect(normalizeDagWatch(true).enabled).toBe(true);
-  });
-
-  test("false disables the bridge", () => {
-    expect(normalizeDagWatch(false).enabled).toBe(false);
-  });
-
-  test("an object overrides individual knobs", () => {
-    expect(normalizeDagWatch({ category: "unspecified-low", pollSeconds: 5 })).toEqual({
-      enabled: true,
-      category: "unspecified-low",
-      pollSeconds: 5,
-      timeoutMinutes: 60,
-    });
-  });
-});
-
-describe("buildWatchDefinition", () => {
-  test("command backend: the node polls the run record file", () => {
-    const definition = buildWatchDefinition({
-      id: RUN_ID,
-      backendType: "command",
-      target: "category:quick",
-      runsDirectory: "/state/runs",
-      watch: normalizeDagWatch(undefined),
-    });
-
-    expect(definition.key).toBe(`miwarang-${RUN_ID}`);
-    expect(definition.name).toContain("category:quick");
-    const node = definition.nodes[0];
-    expect(node.id).toBe("watch");
-    expect(node.category).toBe("quick");
-    expect(node.prompt).toContain(`/state/runs/${RUN_ID}.json`);
-    expect(node.prompt).toContain("30 seconds");
-    expect(node.prompt).toContain("60 minutes");
-    expect(node.prompt).toContain("completed");
-  });
-
-  test("opencode backend: the node waits through the opencode CLI", () => {
-    const node = buildWatchDefinition({
-      id: SES_ID,
-      backendType: "opencode-v2",
-      target: "agent:explore",
-      runsDirectory: "/state/runs",
-      watch: normalizeDagWatch({ category: "unspecified-low" }),
-    }).nodes[0];
-
-    expect(node.category).toBe("unspecified-low");
-    expect(node.prompt).toContain(
-      `opencode api POST /api/experimental/session/${SES_ID}/wait`,
-    );
-    expect(node.prompt).toContain("300000");
-  });
-});
-
-describe("buildEvalCode", () => {
-  test("embeds the definition and returns the run id as JSON", () => {
-    const definition = { key: "k", nodes: [{ id: "watch", category: "quick", prompt: "p" }] };
-    const code = buildEvalCode(definition);
-
-    expect(code).toContain(JSON.stringify(definition));
-    expect(code).toContain(`tool.workflow({ action: "start", definition })`);
-    expect(code).toContain("run_id: runId");
-  });
-});
-
-describe("parseWatchRunId", () => {
-  test("parses the wrapped eval tool result", () => {
-    const inner = JSON.stringify({ ok: true, run_id: DAG_ID });
-    const text = JSON.stringify({
-      toolCall: { name: "eval" },
-      result: { content: [{ type: "text", text: inner }] },
-      isError: false,
-    });
-
-    expect(parseWatchRunId(text)).toBe(DAG_ID);
-  });
-
-  test("falls back to scanning raw text", () => {
-    expect(parseWatchRunId(`prefix ${DAG_ID} suffix`)).toBe(DAG_ID);
-  });
-
-  test("returns undefined when the bridge failed", () => {
-    const inner = JSON.stringify({ ok: false, error: "Tool workflow not found" });
-    const text = JSON.stringify({ result: { content: [{ type: "text", text: inner }] } });
-
-    expect(parseWatchRunId(text)).toBeUndefined();
-    expect(parseWatchRunId("")).toBeUndefined();
-  });
-
-  test("ignores run_ and ses_ ids echoed back from the definition", () => {
-    const echoed = JSON.stringify({ key: `miwarang-${RUN_ID}` });
-    expect(parseWatchRunId(`echo ${echoed}`)).toBeUndefined();
+describe("run states", () => {
+  test("recognizes terminal states", () => {
+    expect(isTerminalState("completed")).toBe(true);
+    expect(isTerminalState("failed")).toBe(true);
+    expect(isTerminalState("cancelled")).toBe(true);
+    expect(isTerminalState("running")).toBe(false);
   });
 });
 

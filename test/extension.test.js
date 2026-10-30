@@ -986,130 +986,6 @@ describe("command backend pricePolicy", () => {
   });
 });
 
-describe("dag watch bridge", () => {
-  const DAG_ID = "dag_33333333-4444-5555-6666-777777777777";
-
-  function evalRecorder(runId) {
-    const calls = [];
-    return {
-      calls,
-      executeTool: async (name, args) => {
-        calls.push([name, args]);
-        const inner = JSON.stringify(
-          runId ? { ok: true, run_id: runId } : { ok: false, error: "no run id" },
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                toolCall: { name },
-                result: { content: [{ type: "text", text: inner }] },
-              }),
-            },
-          ],
-        };
-      },
-    };
-  }
-
-  test("a background delegation starts a watch run through the eval relay", async () => {
-    const { tools } = makeHarness();
-    const relay = evalRecorder(DAG_ID);
-
-    const result = await invoke(
-      tools.get("miwarang_delegate"),
-      { target: "agent:explore", prompt: "List files", mode: "background" },
-      { cwd: "/workspace", executeTool: relay.executeTool },
-    );
-
-    expect(relay.calls).toHaveLength(1);
-    const [name, args] = relay.calls[0];
-    expect(name).toBe("eval");
-    expect(args.action).toBe("run");
-    expect(args.language).toBe("js");
-    expect(args.summary).toContain("miwarang dag watch");
-    expect(args.code).toContain('tool.workflow({ action: "start", definition })');
-    expect(args.code).toContain("miwarang-ses_background");
-    expect(result.details.dagWatch).toEqual({ runId: DAG_ID });
-    expect(result.content[0].text).toContain(`Dag watch: ${DAG_ID}`);
-  });
-
-  test("a command-backend watch embeds the run record path in the node prompt", async () => {
-    const { tools } = makeHarness({ config: wildcardOverrideConfig });
-    const relay = evalRecorder(DAG_ID);
-
-    await invoke(
-      tools.get("miwarang_delegate"),
-      { target: "category:architect", prompt: "Do it", mode: "background" },
-      { cwd: "/workspace", executeTool: relay.executeTool },
-    );
-
-    const code = relay.calls[0][1].code;
-    expect(code).toContain("ses_command_background.json");
-    expect(code).toContain("Poll every 30 seconds");
-  });
-
-  test("a failing bridge never fails the delegation", async () => {
-    const { tools } = makeHarness();
-
-    const result = await invoke(
-      tools.get("miwarang_delegate"),
-      { target: "agent:explore", prompt: "List files", mode: "background" },
-      {
-        cwd: "/workspace",
-        executeTool: async () => {
-          throw new Error("kaboom");
-        },
-      },
-    );
-
-    expect(result.details.dagWatch).toEqual({ error: "kaboom" });
-    expect(result.content[0].text).toContain("Dag watch unavailable: kaboom");
-    expect(result.details.sessionId).toBe("ses_background");
-  });
-
-  test("a host without executeTool reports the bridge as unavailable", async () => {
-    const { tools } = makeHarness();
-
-    const result = await invoke(tools.get("miwarang_delegate"), {
-      target: "agent:explore",
-      prompt: "List files",
-      mode: "background",
-    });
-
-    expect(result.details.dagWatch.error).toContain("ctx.executeTool");
-  });
-
-  test("dagWatch false skips the bridge entirely", async () => {
-    const { tools } = makeHarness({ config: { ...config, dagWatch: false } });
-    const relay = evalRecorder(DAG_ID);
-
-    const result = await invoke(
-      tools.get("miwarang_delegate"),
-      { target: "agent:explore", prompt: "List files", mode: "background" },
-      { cwd: "/workspace", executeTool: relay.executeTool },
-    );
-
-    expect(relay.calls).toHaveLength(0);
-    expect(result.details.dagWatch).toBeUndefined();
-    expect(result.content[0].text).not.toContain("Dag watch");
-  });
-
-  test("foreground delegations never start a watch", async () => {
-    const { tools } = makeHarness();
-    const relay = evalRecorder(DAG_ID);
-
-    await invoke(
-      tools.get("miwarang_delegate"),
-      { target: "category:quick", prompt: "Inspect", mode: "foreground" },
-      { cwd: "/workspace", executeTool: relay.executeTool },
-    );
-
-    expect(relay.calls).toHaveLength(0);
-  });
-});
-
 describe("progress surfaces", () => {
   function uiRecorder() {
     const statuses = [];
@@ -1139,6 +1015,62 @@ describe("progress surfaces", () => {
     expect(statuses.at(-1)[1]).toContain("ses_");
 
     await invoke(tools.get("miwarang_wait"), { sessionId: "ses_background" }, ctx);
+    expect(statuses.at(-1)).toEqual(["miwarang", undefined]);
+  });
+
+  test("tracks and waits for five background runs without a DAG child", async () => {
+    const sessions = [];
+    const opencode = {
+      listModels: async () => liveModels,
+      start: async () => {
+        const sessionId = `ses_multi_${sessions.length + 1}`;
+        sessions.push(sessionId);
+        return { sessionId, state: "running" };
+      },
+      wait: async (sessionId) => ({
+        sessionId,
+        state: "completed",
+        text: `completed ${sessionId}`,
+      }),
+      cancel: async () => ({}),
+    };
+    const { tools } = makeHarness({ backends: { opencode } });
+    const { statuses, ui } = uiRecorder();
+    const ctx = { cwd: "/workspace", ui };
+
+    const started = await Promise.all(
+      Array.from({ length: 5 }, (_, index) =>
+        invoke(
+          tools.get("miwarang_delegate"),
+          {
+            target: "category:quick",
+            prompt: `Background task ${index + 1}`,
+            mode: "background",
+          },
+          ctx,
+        ),
+      ),
+    );
+    const ids = started.map((result) => result.details.sessionId);
+    expect(ids).toEqual([
+      "ses_multi_1",
+      "ses_multi_2",
+      "ses_multi_3",
+      "ses_multi_4",
+      "ses_multi_5",
+    ]);
+    const completed = await Promise.all(
+      ids.map((sessionId) =>
+        invoke(tools.get("miwarang_wait"), { sessionId }, ctx),
+      ),
+    );
+    expect(completed.map((result) => result.content[0].text)).toEqual([
+      "completed ses_multi_1",
+      "completed ses_multi_2",
+      "completed ses_multi_3",
+      "completed ses_multi_4",
+      "completed ses_multi_5",
+    ]);
     expect(statuses.at(-1)).toEqual(["miwarang", undefined]);
   });
 
