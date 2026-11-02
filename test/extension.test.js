@@ -180,7 +180,9 @@ describe("Senpi extension", () => {
       "miwarang_wait",
       "miwarang_cancel",
     ]);
-    const guidance = tools.get("miwarang_delegate").promptGuidelines.join(" ");
+    const delegate = tools.get("miwarang_delegate");
+    const guidance = delegate.promptGuidelines.join(" ");
+    expect(delegate.parameters.required).toEqual(["target", "prompt"]);
     expect(guidance).toMatch(
       /category:quick.*category:visual-engineering.*agent:explore.*agent:omo-native-qa-executor/i,
     );

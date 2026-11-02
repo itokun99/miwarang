@@ -59,7 +59,7 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
     name: "miwarang_delegate",
     label: "Delegate task",
     description:
-      "Delegate a foreground or background task to the configured agent backend and model.",
+      "Delegate a task using a Miwarang route. Only target and prompt are required; normal calls omit backend, model, and agent overrides.",
     promptSnippet:
       "Delegate eligible OMO category and agent tasks through the configured Miwarang backend.",
     promptGuidelines: [
@@ -74,25 +74,52 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         "prefix, preserve the task prompt, and map run_in_background to mode background.",
       "Use miwarang_wait or miwarang_cancel with the returned session or run ID for background work.",
       "Background delegations are tracked automatically: the session status line lists active runs, /miwarang shows the full table, and miwarang_wait returns the terminal result.",
-      "OMO configuration supplies intent/category only. Never copy a model or backend from omo.jsonc or the OMO session. Omit model and backend so Miwarang probes the selected harness's live catalogue and resolves the configured route/fallback chain.",
+      "OMO configuration supplies intent/category only. Never copy a model or backend from omo.jsonc or the OMO session.",
+      "Only target and prompt are required. In normal routing, omit backend, model, and agent; Miwarang resolves the backend and model from its route and live catalogue, and uses any harness agent configured on that route. target: agent:<name> selects an OMO agent route; it is not the optional agent override. mode defaults to foreground; set background only for asynchronous work. Omit cwd to inherit the active workspace.",
       "Routes may define ordered fallbacks with their own backend and model list. Omit backend to let Miwarang choose a configured fallback with the correct harness-specific models; pass backend only for an intentional user-required override. Foreground provider failures may continue through fallbacks, and background runtime failures are reported instead of retried silently.",
     ],
     parameters: Type.Object({
-      target: Type.String(),
-      prompt: Type.String(),
-      mode: Type.Optional(Type.Union([Type.Literal("foreground"), Type.Literal("background")])),
-      backend: Type.Optional(Type.String()),
+      target: Type.String({
+        description:
+          "Required. Full Miwarang route key with its prefix: category:<name> or agent:<name>.",
+      }),
+      prompt: Type.String({
+        description:
+          "Required. Complete delegated task, preserving the original constraints and acceptance criteria.",
+      }),
+      mode: Type.Optional(
+        Type.Union(
+          [Type.Literal("foreground"), Type.Literal("background")],
+          {
+            description:
+              "Optional. Defaults to foreground. Use background only when asynchronous work was requested.",
+          },
+        ),
+      ),
+      backend: Type.Optional(
+        Type.String({
+          description:
+            "Optional harness override. Omit in normal routing so Miwarang selects the configured route and fallback chain.",
+        }),
+      ),
       model: Type.Optional(
         Type.String({
           description:
-            "Optional target-harness model id; it must exist in the target's live catalog " +
-            "(the OpenCode model catalog, or a command backend's model list). Omit it so " +
-            "Miwarang picks from the route's configured candidates. Never pass the OMO " +
-            "session's own model or a model pinned in omo.jsonc.",
+            "Optional target-harness model override. Omit in normal routing so Miwarang selects a configured candidate from the live catalogue. If supplied, it must exist in the target backend's catalogue. Never copy the OMO session's model or a model from omo.jsonc.",
         }),
       ),
-      agent: Type.Optional(Type.String()),
-      cwd: Type.Optional(Type.String()),
+      agent: Type.Optional(
+        Type.String({
+          description:
+            "Optional target-harness agent override. Omit unless a harness-specific override is required; the route supplies its configured agent. This is not the OMO target agent:<name>.",
+        }),
+      ),
+      cwd: Type.Optional(
+        Type.String({
+          description:
+            "Optional absolute project directory. Omit to inherit the active workspace context.",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const target = normalizeTarget(params.target);
@@ -344,8 +371,10 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
       block: true,
       reason:
         `OMO target ${names} is configured for Miwarang delegation. ` +
-        "Call miwarang_delegate with the same prompt and target; use mode background " +
-        "when run_in_background is true, then track the returned ID with miwarang_wait or miwarang_cancel.",
+        "Call miwarang_delegate with the same full target and prompt; only target and prompt are required. " +
+        "Omit backend, model, and agent for normal routing. Omit mode for foreground work; " +
+        "use mode background only when run_in_background is true, then track the returned ID " +
+        "with miwarang_wait or miwarang_cancel.",
     };
   });
 }
