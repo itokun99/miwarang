@@ -28,37 +28,16 @@ export function resolveRoute(config, target, liveModels, overrides = {}) {
       }
       continue;
     }
-    if (route.freeOnly && !isFree(model)) {
-      if (overrides.model) {
-        throw new Error(`Requested model ${modelId} is not free for ${target}`);
-      }
-      continue;
-    }
-
     const result = {
       backend,
       target,
       model: modelId,
-      freeOnly: route.freeOnly === true,
     };
     const agent = overrides.agent ?? route.agent;
     if (agent) result.agent = agent;
     return result;
   }
 
-  if (route.freeOnly) {
-    const availability = candidates
-      .map((modelId) => {
-        const model = liveModels.find((candidate) => modelIdFor(candidate) === modelId);
-        if (!model) return `${modelId}: unavailable`;
-        return `${modelId}: ${isFree(model) ? "free" : "not free"}`;
-      })
-      .join(", ");
-    throw new Error(
-      `No available free model is configured for ${target} ` +
-        `(catalog: ${liveModels.length}; candidates: ${availability})`,
-    );
-  }
   throw new Error(`No configured model is available for ${target}`);
 }
 
@@ -115,19 +94,23 @@ export function resolveTargetRoute(config, target, { backend } = {}) {
     backendName,
     target,
     key,
-    models: backendRoute.models ?? config?.defaultModels ?? [],
+    models:
+      backendRoute.models ??
+      (backendObj.type === "opencode-v2" ? [] : config?.defaultModels ?? []),
     fallbacks,
   };
 }
 
 const PRICE_POLICIES = ["free-only", "free-first", "any"];
 
-function validateRouteShape(name, route, hasDefaultModels = false, allowFallbacks = true) {
+function validateRouteShape(name, route, config, allowFallbacks = true) {
   if (!route || typeof route.backend !== "string") {
     throw new Error(`Route ${name} must name a backend`);
   }
+  const hasDefaultModels = Array.isArray(config.defaultModels);
+  const needsModels = config.backends?.[route.backend]?.type !== "opencode-v2";
   if (route.models === undefined) {
-    if (!hasDefaultModels) {
+    if (needsModels && !hasDefaultModels) {
       throw new Error(
         `Route ${name} must define a models string array (or set top-level defaultModels)`,
       );
@@ -149,7 +132,7 @@ function validateRouteShape(name, route, hasDefaultModels = false, allowFallback
       throw new Error(`${name} fallbacks must be a route object array`);
     }
     route.fallbacks.forEach((fallback, index) => {
-      validateRouteShape(`${name}.fallbacks[${index}]`, fallback, hasDefaultModels, false);
+      validateRouteShape(`${name}.fallbacks[${index}]`, fallback, config, false);
     });
   }
 }
@@ -180,10 +163,8 @@ export function validateConfig(config) {
   ) {
     throw new Error("defaultModels must be a string array");
   }
-  const hasDefaultModels = Array.isArray(config.defaultModels);
-
   for (const [target, route] of Object.entries(config.routes)) {
-    validateRouteShape(target, route, hasDefaultModels);
+    validateRouteShape(target, route, config);
   }
 
   if (config.defaultRoute !== undefined) {
@@ -194,7 +175,7 @@ export function validateConfig(config) {
     ) {
       throw new Error("defaultRoute must be a route object");
     }
-    validateRouteShape("defaultRoute", config.defaultRoute, hasDefaultModels);
+    validateRouteShape("defaultRoute", config.defaultRoute, config);
   }
 
   if (config.blockNativeTask !== undefined) {
@@ -243,21 +224,10 @@ function resolveFallbackRoutes(config, route, target, key) {
       backendName,
       target,
       key: `${key}.fallbacks[${index}]`,
-      models: fallback.models ?? config?.defaultModels ?? [],
+      models:
+        fallback.models ?? (backend.type === "opencode-v2" ? [] : config?.defaultModels ?? []),
       agent: fallback.agent ?? route.agent,
       fallbacks: [],
     };
   });
-}
-
-function isFree(model) {
-  const tiers = Array.isArray(model.cost) ? model.cost : [model.cost];
-  return (
-    tiers.length > 0 &&
-    tiers.every(
-      (tier) =>
-        (tier?.input === 0 || tier?.input === "0") &&
-        (tier?.output === 0 || tier?.output === "0"),
-    )
-  );
 }

@@ -1,13 +1,15 @@
 import { Type } from "typebox";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, resolveRoute, resolveTargetRoute } from "./config.js";
+import { loadConfig } from "./config.js";
 import { createCommandBackend } from "./backends/command.js";
 import { createOpenCodeBackend } from "./backends/opencode.js";
+import { executeDelegate } from "./delegate-routing.js";
+import { registerNativeTaskHook } from "./native-task.js";
 import { RunStore } from "./runs/store.js";
+import { registerRunTools } from "./run-tools.js";
 import {
   createRunTracker,
-  formatRunTable,
   formatStatusLine,
   isTerminalState,
 } from "./watch.js";
@@ -59,9 +61,9 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
     name: "miwarang_delegate",
     label: "Delegate task",
     description:
-      "Delegate a task using a Miwarang route. Only target and prompt are required; normal calls omit backend, model, and agent overrides.",
+      "Delegate an OMO task to the configured OpenCode or Command Code harness.",
     promptSnippet:
-      "Delegate eligible OMO category and agent tasks through the configured Miwarang backend.",
+      "Delegate OMO route tasks through the configured backend.",
     promptGuidelines: [
       "Use miwarang_delegate instead of native task for these targets: " +
         "category:quick, category:unspecified-low, category:unspecified-high, " +
@@ -75,7 +77,10 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
       "Use miwarang_wait or miwarang_cancel with the returned session or run ID for background work.",
       "Background delegations are tracked automatically: the session status line lists active runs, /miwarang shows the full table, and miwarang_wait returns the terminal result.",
       "OMO configuration supplies intent/category only. Never copy a model or backend from omo.jsonc or the OMO session.",
-      "Only target and prompt are required. In normal routing, omit backend, model, and agent; Miwarang resolves the backend and model from its route and live catalogue, and uses any harness agent configured on that route. target: agent:<name> selects an OMO agent route; it is not the optional agent override. mode defaults to foreground; set background only for asynchronous work. Omit cwd to inherit the active workspace.",
+      "OpenCode uses its configured default model and the orchestrator agent; Miwarang does not inspect its model catalog or apply a freeOnly filter.",
+      "Command Code uses its General agent by default. Keep the harness agent and agent_output tools enabled so General can route to available agents.",
+      "Command backends select configured model candidates in order without a freeOnly filter. OMO target agent:<name> selects a Miwarang route, not a harness agent override.",
+      "Only target and prompt are required. Omit backend, model, and agent in normal routing. mode defaults to foreground; use background only for asynchronous work. Omit cwd to inherit the active workspace.",
       "Routes may define ordered fallbacks with their own backend and model list. Omit backend to let Miwarang choose a configured fallback with the correct harness-specific models; pass backend only for an intentional user-required override. Foreground provider failures may continue through fallbacks, and background runtime failures are reported instead of retried silently.",
     ],
     parameters: Type.Object({
@@ -105,13 +110,13 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
       model: Type.Optional(
         Type.String({
           description:
-            "Optional target-harness model override. Omit in normal routing so Miwarang selects a configured candidate from the live catalogue. If supplied, it must exist in the target backend's catalogue. Never copy the OMO session's model or a model from omo.jsonc.",
+            "Optional command-backend model override from that route's candidate list. OpenCode uses its configured default model; do not set model for OpenCode.",
         }),
       ),
       agent: Type.Optional(
         Type.String({
           description:
-            "Optional target-harness agent override. Omit unless a harness-specific override is required; the route supplies its configured agent. This is not the OMO target agent:<name>.",
+            "Optional command-line agent argument when the backend args use {{agent}}. OpenCode always uses orchestrator; Command Code uses General and its internal agent tool. This is not the OMO target agent:<name>.",
         }),
       ),
       cwd: Type.Optional(
@@ -123,139 +128,21 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const target = normalizeTarget(params.target);
-      if (params.backend !== undefined && !config.backends?.[params.backend]) {
-        throw new Error(`Backend ${params.backend} is not configured`);
-      }
-      const resolved = resolveTargetRoute(config, target, { backend: params.backend });
-      const candidates = [resolved, ...(resolved.fallbacks ?? [])];
-      const routeWith = (candidate, models) => ({
-        ...config,
-        routes: { [target]: modelSelectionRoute(candidate, models) },
-      });
-      const selectCandidate = async (startIndex) => {
-        let lastError;
-        for (let index = startIndex; index < candidates.length; index += 1) {
-          const candidate = candidates[index];
-          const backend = backends[candidate.backendName];
-          if (!backend) throw new Error(`Backend ${candidate.backendName} is not configured`);
-
-          const liveModels =
-            candidate.backend.type === "opencode-v2"
-              ? await backend.listModels()
-              : ((await backend.listModels?.()) ??
-                configuredCommandModels(candidate, index === 0 ? params.model : undefined));
-          try {
-            const route = resolveRoute(routeWith(candidate), target, liveModels, {
-              model: index === 0 ? params.model : undefined,
-              agent: params.agent,
-            });
-            return {
-              backend,
-              backendId: candidate.backendName,
-              candidate,
-              index,
-              liveModels,
-              route,
-            };
-          } catch (error) {
-            if (
-              !isModelAvailabilityFailure(error) ||
-              (index === 0 && params.model !== undefined)
-            ) {
-              throw error;
-            }
-            lastError = error;
-          }
-        }
-        return { error: lastError };
-      };
-
-      const firstSelection = await selectCandidate(0);
-      if (!firstSelection.route) throw firstSelection.error;
-      let selected = firstSelection;
-      const requestFor = (model) => ({
-        cwd: params.cwd ?? ctx?.cwd ?? pi.cwd ?? process.cwd(),
+      const execution = await executeDelegate(config, backends, {
         target,
-        model,
-        agent: selected.route.agent,
         prompt: params.prompt,
+        mode: params.mode ?? "foreground",
+        backend: params.backend,
+        model: params.model,
+        agent: params.agent,
+        cwd: params.cwd ?? ctx?.cwd ?? pi.cwd ?? process.cwd(),
       });
-      // Runtime provider or quota failures are invisible to the catalogue
-      // check, so foreground runs continue down the configured candidates
-      // and then any explicitly configured fallback backends until one
-      // produces text. Background start failures can use the same chain
-      // until a run ID is created; failures after a run ID exists are
-      // reported through miwarang_wait instead of retried silently.
-      const mode = params.mode ?? "foreground";
-      let result;
-      if (mode === "background") {
-        const tried = [];
-        for (;;) {
-          try {
-            result = await selected.backend.start(requestFor(selected.route.model));
-            break;
-          } catch (error) {
-            tried.push(selected.route.model);
-            if (params.model !== undefined || !isProviderFailure(selected.candidate, error)) {
-              throw error;
-            }
-            const remaining = selected.candidate.models.filter(
-              (model) => !tried.includes(model),
-            );
-            if (remaining.length) {
-              try {
-                selected = {
-                  ...selected,
-                  route: resolveRoute(routeWith(selected.candidate, remaining), target, selected.liveModels, {
-                    agent: params.agent,
-                  }),
-                };
-                continue;
-              } catch {
-                // The live catalogue can change between selection and execution.
-              }
-            }
-            const next = await selectCandidate(selected.index + 1);
-            if (!next.route) throw error;
-            selected = next;
-            tried.length = 0;
-          }
-        }
-      } else {
-        const tried = [];
-        for (;;) {
-          try {
-            result = await selected.backend.runForeground(requestFor(selected.route.model));
-            break;
-          } catch (error) {
-            tried.push(selected.route.model);
-            if (params.model !== undefined || !isProviderFailure(selected.candidate, error)) {
-              throw error;
-            }
-            const remaining = selected.candidate.models.filter(
-              (model) => !tried.includes(model),
-            );
-            if (remaining.length) {
-              try {
-                selected = {
-                  ...selected,
-                  route: resolveRoute(routeWith(selected.candidate, remaining), target, selected.liveModels, {
-                    agent: params.agent,
-                  }),
-                };
-                continue;
-              } catch {
-                // The live catalogue can change between selection and execution.
-              }
-            }
-            const next = await selectCandidate(selected.index + 1);
-            if (!next.route) throw error;
-            selected = next;
-            tried.length = 0;
-          }
-        }
-      }
-      const resolvedViaValue = resolvedVia(resolved.key, target);
+      const {
+        result,
+        selected,
+        mode,
+        resolvedVia: resolvedViaValue,
+      } = execution;
 
       if (mode === "background") {
         const id = result.sessionId ?? result.runId;
@@ -274,8 +161,8 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
             ...result,
             backend: selected.backendId,
             resolvedVia: resolvedViaValue,
-            model: selected.route.model,
             target,
+            ...(selected.route.model === undefined ? {} : { model: selected.route.model }),
             ...(selected.index > 0
               ? { fallback: true, fallbackIndex: selected.index }
               : {}),
@@ -288,98 +175,18 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
           sessionId: result.sessionId,
           backend: selected.backendId,
           resolvedVia: resolvedViaValue,
-          model: selected.route.model,
           target,
+          ...(selected.route.model === undefined ? {} : { model: selected.route.model }),
           ...(selected.index > 0 ? { fallback: true, fallbackIndex: selected.index } : {}),
         },
       };
     },
   });
 
-  pi.registerTool({
-    name: "miwarang_wait",
-    label: "Wait for delegated task",
-    description: "Wait for delegated background work and return its final result.",
-    parameters: Type.Union([
-      Type.Object({
-        sessionId: Type.String(),
-        backend: Type.Optional(Type.String()),
-      }),
-      Type.Object({
-        runId: Type.String(),
-        backend: Type.Optional(Type.String()),
-      }),
-    ]),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const id = delegatedId(params);
-      const backendId = await backendForRun(config, id, params.backend, store);
-      const result = await backends[backendId].wait(id);
-      tracker.resolve(id, result.state ?? "completed");
-      syncStatus(ctx);
-      return {
-        content: [{ type: "text", text: result.text || `Task state: ${result.state}.` }],
-        details: { ...result, backend: backendId },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "miwarang_cancel",
-    label: "Cancel delegated task",
-    description: "Interrupt delegated background work by its returned ID.",
-    parameters: Type.Union([
-      Type.Object({
-        sessionId: Type.String(),
-        backend: Type.Optional(Type.String()),
-      }),
-      Type.Object({
-        runId: Type.String(),
-        backend: Type.Optional(Type.String()),
-      }),
-    ]),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const id = delegatedId(params);
-      const backendId = await backendForRun(config, id, params.backend, store);
-      const result = await backends[backendId].cancel(id);
-      tracker.resolve(id, result.state ?? "cancelled");
-      syncStatus(ctx);
-      return {
-        content: [{ type: "text", text: `Cancellation state: ${result.state ?? result.interrupted}.` }],
-        details: { ...result, backend: backendId },
-      };
-    },
-  });
-
-  pi.registerCommand("miwarang", {
-    description: "Show the miwarang background runs tracked in this session",
-    handler: async (_args, ctx) => {
-      await tracker.refresh();
-      syncStatus(ctx);
-      ctx.ui.notify(formatRunTable(tracker.list()), "info");
-    },
-  });
-
-  pi.on("tool_call", (event) => {
-    if (event.toolName !== "task") return;
-    const blocked = taskTargets(event.input).filter((target) =>
-      shouldBlockNativeTask(config, target),
-    );
-    if (!blocked.length) return;
-
-    const names = blocked.join(", ");
-    return {
-      block: true,
-      reason:
-        `OMO target ${names} is configured for Miwarang delegation. ` +
-        "Call miwarang_delegate with the same full target and prompt; only target and prompt are required. " +
-        "Omit backend, model, and agent for normal routing. Omit mode for foreground work; " +
-        "use mode background only when run_in_background is true, then track the returned ID " +
-        "with miwarang_wait or miwarang_cancel.",
-    };
-  });
+  registerRunTools(pi, { config, backends, store, tracker, syncStatus });
+  registerNativeTaskHook(pi, config);
 }
 
-// The dag `workflow` tool is exposure-hidden from model calls, and a plain
 function createBackends(config, store = new RunStore({ directory: config.runsDirectory })) {
   const backends = {};
   for (const [id, backend] of Object.entries(config.backends)) {
@@ -392,152 +199,6 @@ function createBackends(config, store = new RunStore({ directory: config.runsDir
     }
   }
   return backends;
-}
-
-// Effective price policy: the route-level value wins over the backend-level
-// one; both default to "any".
-function effectivePricePolicy(route) {
-  return route.pricePolicy ?? route.backend?.pricePolicy ?? "any";
-}
-
-// The route handed to resolveRoute. A command backend without a model-list
-// probe (listModelsArgv) cannot verify availability or prices, so when the
-// effective pricePolicy is "any" its freeOnly constraint is dropped there.
-// opencode-v2 and probing command backends keep the catalogue-backed gate.
-function modelSelectionRoute(resolved, models = resolved.models) {
-  const pricePolicy = effectivePricePolicy(resolved);
-  const unverifiableCommand =
-    resolved.backend?.type === "command" && !resolved.backend?.listModelsArgv;
-  const freeOnly = resolved.freeOnly && !(unverifiableCommand && pricePolicy === "any");
-  return {
-    backend: resolved.backendName,
-    models,
-    freeOnly,
-    agent: resolved.agent,
-  };
-}
-
-function resolvedVia(key, target) {
-  if (key === "defaultRoute") return "default";
-  if (key === target) return "exact";
-  return "wildcard";
-}
-
-function isModelAvailabilityFailure(error) {
-  return /^(?:No available free model is configured for|No configured model is available for)/.test(
-    String(error?.message ?? error),
-  );
-}
-
-function isProviderFailure(candidate, error) {
-  const message = String(error?.message ?? error);
-  if (candidate.backend?.type === "opencode-v2") {
-    return (
-      /^OpenCode session \S+ (?:failed:|returned no assistant text)/.test(message) ||
-      /^OpenCode API \S+ \S+ failed \(exit \d+\)/.test(message)
-    );
-  }
-  if (candidate.backend?.type !== "command") return false;
-  return /(?:quota|rate limit|usage limit|5-hour|weekly limit|credits exhausted|429)/i.test(
-    message,
-  );
-}
-
-// Fallback catalogue for command backends without a listModelsArgv probe, or
-// when that probe fails: the configured candidates themselves become the
-// catalogue with unknown (non-free) pricing, so a freeOnly route only reaches
-// one when the effective pricePolicy allows any model. The route-level
-// pricePolicy wins over the backend-level one; both default to "any".
-export function configuredCommandModels(route, modelOverride) {
-  const ids = modelOverride ? [modelOverride] : route.models;
-  const pricePolicy = effectivePricePolicy(route);
-  if (route.freeOnly && pricePolicy === "freeOnly") {
-    throw new Error("freeOnly routes require a backend with a live model catalog");
-  }
-  return ids.map((id) => {
-    const slash = id.indexOf("/");
-    return slash < 1
-      ? { providerID: "", id, cost: { input: 1, output: 1 } }
-      : { providerID: id.slice(0, slash), id: id.slice(slash + 1), cost: { input: 1, output: 1 } };
-  });
-}
-
-// Resolve which backend owns a delegated ID. An explicit `backend` parameter
-// wins; otherwise a `run_` ID is looked up in the run store (command backends
-// record their own id there), and only when no record is found does the legacy
-// id-prefix heuristic apply. The heuristic is deliberately unchanged so
-// pre-existing runs keep resolving.
-export async function backendForRun(config, runId, requestedBackend, store) {
-  if (requestedBackend) {
-    if (!config.backends[requestedBackend]) throw new Error(`Backend ${requestedBackend} is not configured`);
-    return requestedBackend;
-  }
-  if (runId.startsWith("run_")) {
-    const record = store ? await store.get(runId).catch(() => undefined) : undefined;
-    if (record && typeof record.backend === "string" && config.backends[record.backend]) {
-      return record.backend;
-    }
-  }
-  if (runId.startsWith("ses_")) {
-    const entry = Object.entries(config.backends).find(([, backend]) => backend.type === "opencode-v2");
-    if (entry) return entry[0];
-  }
-  if (runId.startsWith("run_")) {
-    const entry = Object.entries(config.backends).find(([, backend]) => backend.type === "command");
-    if (entry) return entry[0];
-  }
-  throw new Error(`Cannot determine backend for run ID ${runId}`);
-}
-
-function delegatedId(params) {
-  const id = params.sessionId ?? params.runId;
-  if (typeof id !== "string" || !id) {
-    throw new Error("Provide a sessionId or runId returned by miwarang_delegate");
-  }
-  return id;
-}
-
-function taskTargets(input) {
-  if (!input || typeof input !== "object") return [];
-  const tasks = Array.isArray(input.tasks) ? input.tasks : [input];
-  return tasks.flatMap((task) => {
-    if (typeof task.category === "string") return [`category:${task.category}`];
-    if (typeof task.subagent_type === "string") return [`agent:${task.subagent_type}`];
-    return [];
-  });
-}
-
-// Native-task interception policy. The effective route is resolved first; an
-// explicit per-route blockNativeTask wins over the top-level flag, which
-// defaults to "configured" (block exact and wildcard matches only, preserving
-// v0.1.1 behaviour). defaultRoute is a fallback, not an explicit route, so it
-// never blocks, and targets that do not resolve at all always pass through.
-function shouldBlockNativeTask(config, target) {
-  let resolved;
-  try {
-    resolved = resolveTargetRoute(config, target);
-  } catch {
-    return false;
-  }
-  if (resolved.key === "defaultRoute") return false;
-
-  const flag = resolved.blockNativeTask ?? config.blockNativeTask ?? "configured";
-  return blockNativeTaskCovers(flag, target);
-}
-
-function blockNativeTaskCovers(flag, target) {
-  if (flag === false || flag === "none") return false;
-  if (flag === true || flag === "all" || flag === "configured") return true;
-  if (Array.isArray(flag)) {
-    return flag.includes(target) || flag.includes(namespaceWildcard(target));
-  }
-  return false;
-}
-
-function namespaceWildcard(target) {
-  if (target.startsWith("category:")) return "category:*";
-  if (target.startsWith("agent:")) return "agent:*";
-  return target;
 }
 
 function normalizeTarget(target) {

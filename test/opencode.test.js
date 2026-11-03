@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createOpenCodeBackend, runOpenCodeCli } from "../src/backends/opencode.js";
+import { createOpenCodeBackend } from "../src/backends/opencode.js";
 
 function jsonResponse(value) {
   return { stdout: JSON.stringify(value), stderr: "", exitCode: 0 };
@@ -47,88 +47,7 @@ const assistantMessages = {
 };
 
 describe("OpenCode v2 backend", () => {
-  test("lists the authenticated local model catalog", async () => {
-    const { backend, calls } = makeBackend([
-      jsonResponse({
-        data: [
-          {
-            providerID: "opencode",
-            id: "space-bunny-free",
-            cost: { input: 0, output: 0 },
-          },
-        ],
-      }),
-    ]);
-
-    expect(await backend.listModels()).toEqual([
-      {
-        providerID: "opencode",
-        id: "space-bunny-free",
-        cost: { input: 0, output: 0 },
-      },
-    ]);
-    expect(calls).toEqual([["api", "GET", "/api/model"]]);
-  });
-
-  test("retries once when the model catalog is empty on the first call", async () => {
-    const fullCatalog = [
-      {
-        providerID: "opencode",
-        id: "space-bunny-free",
-        cost: { input: 0, output: 0 },
-      },
-    ];
-    const { backend, calls } = makeBackend([
-      jsonResponse({ data: [] }),
-      jsonResponse({ data: fullCatalog }),
-    ]);
-
-    expect(await backend.listModels()).toEqual(fullCatalog);
-    expect(calls).toEqual([
-      ["api", "GET", "/api/model"],
-      ["api", "GET", "/api/model"],
-    ]);
-  });
-
-  test("returns an empty catalog after a second empty response", async () => {
-    const { backend, calls } = makeBackend([
-      jsonResponse({ data: [] }),
-      jsonResponse({ data: [] }),
-    ]);
-
-    expect(await backend.listModels()).toEqual([]);
-    expect(calls).toHaveLength(2);
-  });
-
-  test("does not retry when the first catalog response is malformed", async () => {
-    const { backend, calls } = makeBackend([
-      jsonResponse({ data: "not-an-array" }),
-    ]);
-
-    await expect(backend.listModels()).rejects.toThrow(
-      "OpenCode model catalog response has no data array",
-    );
-    expect(calls).toHaveLength(1);
-  });
-
-  test("propagates an error from the retry attempt instead of swallowing it", async () => {
-    let attempts = 0;
-    const backend = createOpenCodeBackend({
-      command: "opencode",
-      run: async () => {
-        attempts += 1;
-        if (attempts === 1) return jsonResponse({ data: [] });
-        throw new Error("OpenCode API GET /api/model failed (exit 124)");
-      },
-    });
-
-    await expect(backend.listModels()).rejects.toThrow(
-      "OpenCode API GET /api/model failed (exit 124)",
-    );
-    expect(attempts).toBe(2);
-  });
-
-  test("starts background work and returns the OpenCode session ID", async () => {
+  test("starts an orchestrator session with the configured model default", async () => {
     const { backend, calls } = makeBackend([
       jsonResponse(session),
       jsonResponse({ data: { id: "msg_user" } }),
@@ -139,17 +58,16 @@ describe("OpenCode v2 backend", () => {
         cwd: "/workspace",
         target: "agent:explore",
         model: "opencode/space-bunny-free",
-        agent: "build",
+        agent: "explore",
         prompt: "Inspect this project",
       }),
     ).resolves.toEqual({ sessionId: "ses_test123", state: "running" });
     expect(calls).toHaveLength(2);
     expect(calls[0].slice(0, 2)).toEqual(["api", "--data"]);
     expect(JSON.parse(calls[0][2])).toEqual({
-      model: { providerID: "opencode", id: "space-bunny-free" },
       location: { directory: "/workspace" },
       title: "Miwarang: agent:explore",
-      agent: "build",
+      agent: "orchestrator",
     });
     expect(calls[0].slice(3)).toEqual(["POST", "/api/session"]);
     expect(calls[1]).toEqual([
@@ -315,30 +233,6 @@ describe("OpenCode v2 backend", () => {
 
     await expect(backend.wait("ses_test123")).rejects.toThrow(
       "OpenCode session ses_test123 failed: provider.quota (402) Upstream request failed: Endpoint is unavailable.",
-    );
-  });
-
-  test("reports a timed-out CLI run as exit 124 and keeps stderr", async () => {
-    const result = await runOpenCodeCli("sh", ["-c", "printf 'boom' >&2; exec sleep 5"], {
-      timeoutMs: 50,
-    });
-
-    expect(result).toEqual({ stdout: "", stderr: "boom", exitCode: 124 });
-  });
-
-  test("keeps the real exit code and stderr of a failing CLI run", async () => {
-    const result = await runOpenCodeCli("sh", ["-c", "printf 'nope' >&2; exit 7"]);
-
-    expect(result).toEqual({ stdout: "", stderr: "nope", exitCode: 7 });
-  });
-
-  test("surfaces a timed-out backend request as exit 124", async () => {
-    const backend = createOpenCodeBackend({
-      run: () => runOpenCodeCli("sh", ["-c", "exec sleep 5"], { timeoutMs: 50 }),
-    });
-
-    await expect(backend.listModels()).rejects.toThrow(
-      "OpenCode API GET /api/model failed (exit 124)",
     );
   });
 

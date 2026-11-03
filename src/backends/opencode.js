@@ -44,13 +44,12 @@ export function createOpenCodeBackend({
     return retryData;
   }
 
-  async function start({ cwd, target, model, agent, prompt }) {
+  async function start({ cwd, target, prompt }) {
     const createBody = {
-      model: modelReference(model),
       location: { directory: cwd },
       title: `Miwarang: ${target}`,
+      agent: "orchestrator",
     };
-    if (agent) createBody.agent = agent;
 
     const sessionResponse = await request("POST", "/api/session", createBody);
     const sessionId = sessionResponse?.data?.id ?? sessionResponse?.id;
@@ -122,17 +121,6 @@ export function createOpenCodeBackend({
   }
 
   return { listModels, start, wait, runForeground, cancel };
-}
-
-function modelReference(modelId) {
-  const slash = modelId.indexOf("/");
-  if (slash < 1 || slash === modelId.length - 1) {
-    throw new Error(`Model must use provider/model format: ${modelId}`);
-  }
-  return {
-    providerID: modelId.slice(0, slash),
-    id: modelId.slice(slash + 1),
-  };
 }
 
 // Provider failures surface as an `error` object on the assistant step (for

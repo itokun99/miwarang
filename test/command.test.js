@@ -1,10 +1,46 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
+import { readFile } from "node:fs/promises";
 import {
   buildCommandInvocation,
   createCommandBackend,
   parseCommandModelList,
 } from "../src/backends/command.js";
+
+describe("Command Code agent tool configuration", () => {
+  test("enables the harness agent tools for the headless backend", async () => {
+    const config = JSON.parse(
+      await readFile(new URL("../config.example.json", import.meta.url), "utf8"),
+    );
+    const args = config.backends.commandcode.args;
+    const flag = args.indexOf("--tools-enable");
+
+    expect(args[flag + 1]).toBe("agent,agent_output");
+  });
+
+  test("keeps every Command Code route free-first with only cheap fallbacks", async () => {
+    const config = JSON.parse(
+      await readFile(new URL("../config.example.json", import.meta.url), "utf8"),
+    );
+    const preferredModels = [
+      "reflection/beam:free",
+      "poolside/laguna-s-2.1-free",
+      "stealth/glyph-cluster:free",
+      "deepseek/deepseek-v4-flash",
+      "qwen/qwen3.8-flash",
+      "qwen/qwen3.7-flash",
+    ];
+    const modelLists = Object.values(config.routes).flatMap((route) => [
+      ...(route.backend === "commandcode" ? [route.models] : []),
+      ...(route.fallbacks ?? [])
+        .filter((fallback) => fallback.backend === "commandcode")
+        .map((fallback) => fallback.models),
+    ]);
+
+    expect(config.routes["category:writing"].models).toEqual(preferredModels);
+    for (const models of modelLists) expect(models).toEqual(preferredModels);
+  });
+});
 
 describe("buildCommandInvocation", () => {
   test("expands configured arguments without building a shell command", () => {
