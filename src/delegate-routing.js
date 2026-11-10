@@ -184,7 +184,9 @@ function isProviderFailure(candidate, error) {
       /^OpenCode API \S+ \S+ failed \(exit \d+\)/.test(message)
     );
   }
-  if (candidate.backend?.type !== "command") return false;
+  if (candidate.backend?.type !== "command" && candidate.backend?.type !== "koma-sdk") {
+    return false;
+  }
   return /(?:quota|rate limit|usage limit|5-hour|weekly limit|credits exhausted|429)/i.test(
     message,
   );

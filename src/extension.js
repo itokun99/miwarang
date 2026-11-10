@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { createCommandBackend } from "./backends/command.js";
+import { createKomaBackend } from "./backends/koma.js";
 import { createOpenCodeBackend } from "./backends/opencode.js";
 import { executeDelegate } from "./delegate-routing.js";
 import { registerNativeTaskHook } from "./native-task.js";
@@ -194,6 +195,8 @@ function createBackends(config, store = new RunStore({ directory: config.runsDir
       backends[id] = createOpenCodeBackend({ command: backend.command });
     } else if (backend.type === "command") {
       backends[id] = createCommandBackend({ ...backend, id }, { runStore: store });
+    } else if (backend.type === "koma-sdk") {
+      backends[id] = createKomaBackend({ ...backend, id }, { runStore: store });
     } else {
       throw new Error(`Unknown backend type ${backend.type} for ${id}`);
     }

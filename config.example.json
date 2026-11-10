@@ -12,6 +12,12 @@
       "promptInput": "argument",
       "timeoutMs": 900000,
       "listModelsArgv": ["--list-models"]
+    },
+    "koma": {
+      "type": "koma-sdk",
+      "command": "koma",
+      "args": ["sdk", "serve"],
+      "timeoutMs": 900000
     }
   },
   "routes": {
@@ -28,6 +34,10 @@
             "qwen/qwen3.8-flash",
             "qwen/qwen3.7-flash"
           ]
+        },
+        {
+          "backend": "koma",
+          "models": ["koma/apple"]
         }
       ]
     },
@@ -49,7 +59,8 @@
         "deepseek/deepseek-v4-flash",
         "qwen/qwen3.8-flash",
         "qwen/qwen3.7-flash"
-      ]
+      ],
+      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
     },
     "category:artistry": {
       "backend": "opencode"
@@ -89,7 +100,8 @@
         "deepseek/deepseek-v4-flash",
         "qwen/qwen3.8-flash",
         "qwen/qwen3.7-flash"
-      ]
+      ],
+      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
     },
     "agent:omo-native-gate-reviewer": {
       "backend": "commandcode",
@@ -100,7 +112,8 @@
         "deepseek/deepseek-v4-flash",
         "qwen/qwen3.8-flash",
         "qwen/qwen3.7-flash"
-      ]
+      ],
+      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
     },
     "agent:omo-native-qa-executor": {
       "backend": "commandcode",
@@ -111,7 +124,8 @@
         "deepseek/deepseek-v4-flash",
         "qwen/qwen3.8-flash",
         "qwen/qwen3.7-flash"
-      ]
+      ],
+      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
     },
     "category:*": {
       "backend": "opencode"

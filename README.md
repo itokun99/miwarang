@@ -63,6 +63,8 @@ Miwarang routes each OMO target to a configured backend. Routes resolve in this 
 
 All 10 categories and 7 agents are routed in the example config below. `category:ultrabrain` and `category:deep-high` set `blockNativeTask: false`; the top-level `blockNativeTask: "all"` blocks native `task` calls for the other configured targets.
 
+Every Command Code lane — `category:quick`, `category:writing`, and the three `agent:omo-native-*` routes — also carries koma as a final fallback, so the bundled free model absorbs work when OpenCode and Command Code are unavailable.
+
 OpenCode sessions use the model configured in the OpenCode harness and the `orchestrator` agent. Miwarang does not query OpenCode's model catalogue or apply `freeOnly` restrictions. Command Code routes still use their configured model candidates in order, but Miwarang does not filter candidates by free/paid status. Both backends may have ordered fallbacks.
 
 ### Block policy
@@ -127,6 +129,27 @@ Command Code print mode uses its built-in General agent unless a harness agent i
 
 `--yolo` is required: commandcode's print mode denies file writes and shell by default, so without `--yolo` the harness cannot perform edits or run tools. With `--yolo`, commandcode auto-approves every tool call — scope each delegation with an explicit `cwd` and prefer dedicated worktrees for risky edits. `listModelsArgv` turns on the availability check: `commandcode --list-models` feeds the configured candidate selection.
 
+### Koma recipe
+
+To add the [koma](https://koma.run) harness as a backend:
+
+```json
+"koma": {
+  "type": "koma-sdk",
+  "command": "koma",
+  "args": ["sdk", "serve"],
+  "timeoutMs": 900000
+}
+```
+
+Koma has no reply-printing headless mode: `koma run --prompt … --once` prints only session metadata, and the assistant reply never reaches its stdout. Miwarang therefore talks to koma's public SDK stdio adapter, a JSON Lines protocol (`hello`, `create`, `submit`, `state` events, `interrupt`, `detach`) documented in the koma repository under `src-core-sdk/protocol/CONTRACT.md`. Nothing is interpolated into a shell: the adapter spawns `koma sdk serve` as an argv array and streams the prompt over that process's stdin.
+
+A koma route names model candidates exactly like a command backend, and there is no model-list probe, so the configured list is authoritative. koma's bundled free model is `koma/apple` (provider `koma free`, `api_type` `koma_free`, endpoint `https://koma.run/api/v1/koma-free`); it is used unless the route names another candidate. Add `"policy"` only to change the session policy — the default is `{ "plan": "forbid", "approval": "reject" }`, matching koma's own headless default, where `plan` is `allow` or `forbid` and `approval` is `default` or `reject`.
+
+Delegations run headless: koma starts a turn, Miwarang waits for the terminal turn state, and returns the newest assistant message. Background runs expose a Miwarang run ID; `miwarang_wait` returns the recorded result, and `miwarang_cancel` interrupts the active turn.
+
+In the example config, koma is appended as a last-resort fallback after the Command Code candidates. Move it earlier in a route's `fallbacks` array to prefer the free model before the paid candidates.
+
 ### Example config
 
 The committed example config (`config.example.json`) routes all 10 categories and 7 agents:
@@ -146,6 +169,12 @@ The committed example config (`config.example.json`) routes all 10 categories an
       "promptInput": "argument",
       "timeoutMs": 900000,
       "listModelsArgv": ["--list-models"]
+    },
+    "koma": {
+      "type": "koma-sdk",
+      "command": "koma",
+      "args": ["sdk", "serve"],
+      "timeoutMs": 900000
     }
   },
   "routes": {
@@ -162,6 +191,10 @@ The committed example config (`config.example.json`) routes all 10 categories an
             "qwen/qwen3.8-flash",
             "qwen/qwen3.7-flash"
           ]
+        },
+        {
+          "backend": "koma",
+          "models": ["koma/apple"]
         }
       ]
     },
@@ -183,7 +216,8 @@ The committed example config (`config.example.json`) routes all 10 categories an
         "deepseek/deepseek-v4-flash",
         "qwen/qwen3.8-flash",
         "qwen/qwen3.7-flash"
-      ]
+      ],
+      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
     },
     "category:artistry": {
       "backend": "opencode"
@@ -223,7 +257,8 @@ The committed example config (`config.example.json`) routes all 10 categories an
         "deepseek/deepseek-v4-flash",
         "qwen/qwen3.8-flash",
         "qwen/qwen3.7-flash"
-      ]
+      ],
+      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
     },
     "agent:omo-native-gate-reviewer": {
       "backend": "commandcode",
@@ -234,7 +269,8 @@ The committed example config (`config.example.json`) routes all 10 categories an
         "deepseek/deepseek-v4-flash",
         "qwen/qwen3.8-flash",
         "qwen/qwen3.7-flash"
-      ]
+      ],
+      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
     },
     "agent:omo-native-qa-executor": {
       "backend": "commandcode",
@@ -245,7 +281,8 @@ The committed example config (`config.example.json`) routes all 10 categories an
         "deepseek/deepseek-v4-flash",
         "qwen/qwen3.8-flash",
         "qwen/qwen3.7-flash"
-      ]
+      ],
+      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
     },
     "category:*": {
       "backend": "opencode"
