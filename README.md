@@ -1,6 +1,33 @@
-# Miwarang Senpi Delegate
+# Miwarang Delegate
 
 Miwarang registers Senpi tools that delegate work by prompt to configured second-orchestrator harnesses. It is a unified delegation tool: any agent platform (OMO, OpenCode plugins, Command Code mods, Claude Code mods, …) can call `miwarang_delegate` with a prompt, and the configured backend harnesses own their models and agents. Miwarang never selects a model and never runs an agent itself.
+
+## MCP server
+
+Miwarang also runs as a stdio MCP server, so any MCP-speaking host (Claude Code, Cursor, OpenCode, …) can reach the same delegation chain without the Senpi extension:
+
+```sh
+MIWARANG_CONFIG=~/.config/miwarang/config.json bun src/mcp-server.ts
+```
+
+Claude Code example:
+
+```json
+{
+  "mcpServers": {
+    "miwarang": {
+      "command": "bun",
+      "args": ["/path/to/miwarang/src/mcp-server.ts"]
+    }
+  }
+}
+```
+
+The server exposes `miwarang_delegate`, `miwarang_wait`, and `miwarang_cancel`; every result carries the versioned envelope documented in `skills/miwarang/SKILL.md`.
+
+## Delegation skill
+
+`skills/miwarang/SKILL.md` is the companion skill: when to delegate, the tool contract, the response envelope, and host wiring recipes.
 
 ## Requirements
 
@@ -137,7 +164,7 @@ Command-run metadata is stored under `~/.local/state/miwarang/runs` by default, 
 
 ## License
 
-Miwarang Senpi Delegate is distributed under the MIT License. See [LICENSE](LICENSE).
+Miwarang Delegate is distributed under the MIT License. See [LICENSE](LICENSE).
 
 ## Development
 

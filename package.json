@@ -1,6 +1,6 @@
 {
-  "name": "miwarang-senpi-delegate",
-  "version": "0.9.2",
+  "name": "miwarang-delegate",
+  "version": "0.9.3",
   "license": "MIT",
   "private": true,
   "type": "module",

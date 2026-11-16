@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve Miwarang Senpi Delegate.
+Thanks for helping improve Miwarang Delegate.
 
 ## Before you start
 
