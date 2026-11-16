@@ -134,7 +134,7 @@ describe("command backend lifecycle", () => {
       { command: "agent-cli", args: [], promptInput: "stdin" },
       { runStore: {} as never, spawn: () => fakeChild({ stdout: "  result text\n" }) as never },
     );
-    expect(await ok.runForeground({ prompt: "work" })).toEqual({ text: "result text", exitCode: 0 });
+    expect(await ok.runForeground({ prompt: "work" })).toEqual({ text: "result text", exitCode: 0, signal: null });
 
     const bad = createCommandBackend(
       { command: "agent-cli", args: [], promptInput: "stdin" },

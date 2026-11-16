@@ -1,11 +1,13 @@
 import { spawn as spawnProcess } from "node:child_process";
 import { RunStore } from "../runs/store.ts";
+import { redactSecrets } from "../redact.ts";
+import { emitDelta } from "../stream.ts";
 
 const MAX_CAPTURE_BYTES = 1024 * 1024;
-const SECRET_PATTERNS: RegExp[] = [
-  /(Bearer\s+)[^\s"'`]+/gi,
-  /((?:api[-_]?key|token|secret)\s*[:=]\s*)[^\s"'`]+/gi,
-];
+// Bounded escalation after SIGTERM: if the process group ignores SIGTERM this
+// long, SIGKILL ends it so cancel() can return a terminal state.
+const CANCEL_GRACE_MS = 3000;
+const CANCEL_ESCALATION_SIGNAL = "SIGKILL";
 
 export interface CommandConfig {
   command: string;
@@ -21,6 +23,7 @@ export interface CommandRequest {
   prompt: string;
   agent?: string;
   cwd?: string;
+  onUpdate?: (delta: string) => void;
 }
 
 export interface Invocation {
@@ -35,6 +38,7 @@ interface CaptureResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  signal: string | null;
 }
 
 export function buildCommandInvocation(config: CommandConfig, request: CommandRequest): Invocation {
@@ -104,12 +108,12 @@ export function createCommandBackend(
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
-    const result = captureChild(child, invocation.input);
+    const result = captureChild(child, invocation.input, request.onUpdate);
     const completed = await withTimeout(result, invocation.timeoutMs, () => child.kill("SIGTERM"));
     if (completed.exitCode !== 0) {
       throw new Error(commandFailure(completed));
     }
-    return { text: completed.stdout, exitCode: 0 };
+    return { text: redactSecrets(completed.stdout), exitCode: 0, signal: completed.signal };
   }
 
   async function start(request: CommandRequest) {
@@ -127,7 +131,7 @@ export function createCommandBackend(
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
-    const completed = captureChild(child, invocation.input);
+    const completed = captureChild(child, invocation.input, request.onUpdate);
     const run = { child, cancelRequested: false } as ActiveRun;
     active.set(record.id, run);
 
@@ -141,8 +145,9 @@ export function createCommandBackend(
         const updated = await runStore.update(record.id, {
           state,
           exitCode: result.exitCode,
-          resultText: result.stdout,
-          errorText: result.stderr,
+          signal: result.signal,
+          resultText: redactSecrets(result.stdout),
+          errorText: redactSecrets(result.stderr),
           finishedAt: new Date().toISOString(),
         });
         active.delete(record.id);
@@ -152,7 +157,7 @@ export function createCommandBackend(
         active.delete(record.id);
         await runStore.update(record.id, {
           state: "failed",
-          errorText: sanitize(error.message),
+          errorText: redactSecrets(error.message),
           finishedAt: new Date().toISOString(),
         });
         throw error;
@@ -166,7 +171,7 @@ export function createCommandBackend(
     } catch (error) {
       run.cancelRequested = true;
       await run.completion.catch(() => {});
-      throw new Error(`Could not start configured command: ${sanitize((error as Error).message)}`);
+      throw new Error(`Could not start configured command: ${redactSecrets((error as Error).message)}`);
     }
   }
 
@@ -186,7 +191,13 @@ export function createCommandBackend(
     if (!run) {
       const record = await runStore.get(runId);
       if (!record) throw new Error(`No command run found for ID ${runId}`);
-      return { runId, state: record.state as string, cancelled: false };
+      return {
+        runId,
+        state: record.state as string,
+        exitCode: typeof record.exitCode === "number" ? record.exitCode : undefined,
+        signal: typeof record.signal === "string" ? record.signal : null,
+        cancelled: false,
+      };
     }
 
     run.cancelRequested = true;
@@ -199,7 +210,35 @@ export function createCommandBackend(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
     }
-    return { runId, state: "cancelling", cancelled: true };
+    // Wait for a terminal child close, escalating to SIGKILL after the grace
+    // window so the stored state and wait() reach terminal without polling.
+    const closed = await Promise.race([
+      run.completion.then(() => true).catch(() => true),
+      new Promise<false>((resolve) => {
+        const timer = setTimeout(() => resolve(false), CANCEL_GRACE_MS);
+        timer.unref?.();
+      }),
+    ]);
+    if (!closed) {
+      try {
+        if (process.platform !== "win32" && run.child.pid) {
+          process.kill(-run.child.pid, CANCEL_ESCALATION_SIGNAL);
+        } else {
+          run.child.kill(CANCEL_ESCALATION_SIGNAL);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+      await run.completion.catch(() => {});
+    }
+    const record = await runStore.get(runId);
+    return {
+      runId,
+      state: (record?.state as string) ?? "cancelled",
+      exitCode: typeof record?.exitCode === "number" ? record.exitCode : undefined,
+      signal: typeof record?.signal === "string" ? record.signal : null,
+      cancelled: true,
+    };
   }
 
   return { runForeground, start, wait, cancel };
@@ -208,6 +247,7 @@ export function createCommandBackend(
 function captureChild(
   child: ReturnType<typeof spawnProcess>,
   input?: string | undefined,
+  onUpdate?: (delta: string) => void,
 ) {
   return new Promise<CaptureResult>((resolve, reject) => {
     let stdout = "";
@@ -218,6 +258,7 @@ function captureChild(
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       stdout = appendCapped(stdout, chunk);
+      if (onUpdate) emitDelta(onUpdate, chunk);
     });
     child.stderr?.on("data", (chunk: string) => {
       stderr = appendCapped(stderr, chunk);
@@ -232,8 +273,9 @@ function captureChild(
       settled = true;
       resolve({
         stdout: stdout.trim(),
-        stderr: sanitize(stderr.trim()),
+        stderr: redactSecrets(stderr.trim()),
         exitCode: Number.isInteger(code) ? (code as number) : signal ? 1 : 0,
+        signal: signal ?? null,
       });
     });
 
@@ -287,15 +329,10 @@ function runResult(record: Record<string, any>) {
   return {
     runId: record.id,
     state: record.state,
-    text: record.resultText ?? "",
-    error: record.errorText ?? "",
+    text: redactSecrets(record.resultText ?? ""),
+    error: redactSecrets(record.errorText ?? ""),
     exitCode: record.exitCode,
+    signal: record.signal ?? null,
   };
 }
 
-function sanitize(text: unknown): string {
-  return SECRET_PATTERNS.reduce(
-    (value: string, pattern: RegExp) => value.replace(pattern, "$1[redacted]"),
-    String(text ?? ""),
-  );
-}

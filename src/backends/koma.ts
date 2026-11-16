@@ -1,5 +1,6 @@
 import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { RunStore } from "../runs/store.ts";
+import { redactSecrets } from "../redact.ts";
 
 // koma's headless one-shot (`koma run --prompt …`) prints only session
 // metadata; the assistant reply never reaches its stdout, so koma cannot back a
@@ -14,10 +15,6 @@ const PROTOCOL_VERSION = 1;
 const REQUIRED_CAPABILITIES = ["create", "submit", "detach"];
 const TERMINAL_TURN_STATES = new Set(["finished", "interrupted", "failed"]);
 const MAX_STDERR_BYTES = 64 * 1024;
-const SECRET_PATTERNS: Array<[RegExp, string]> = [
-  [/(Bearer\s+)[^\s"'`]+/gi, "$1[redacted]"],
-  [/((?:api[-_]?key|token|secret)\s*[:=]\s*)[^\s"'`]+/gi, "$1[redacted]"],
-];
 
 export interface KomaConfig {
   command?: string;
@@ -46,7 +43,7 @@ interface Session {
   turnId: string;
   closed: boolean;
   cancelled: boolean;
-  completion?: Promise<{ state: string; text: string; error?: string }>;
+  completion?: Promise<{ state: string; text: string; error?: string; exitCode: number; signal?: string | null }>;
 }
 
 interface Connection {
@@ -118,7 +115,7 @@ export function createKomaBackend(config: KomaConfig = {}, dependencies: KomaDep
     const session = await openSession(request);
     try {
       const state = await session.connection.waitForTurn();
-      return { sessionId: session.daemonSessionId, text: assistantText(state, "koma run") };
+      return { sessionId: session.daemonSessionId, text: redactSecrets(assistantText(state, "koma run")) };
     } finally {
       await closeSession(session);
     }
@@ -158,21 +155,30 @@ export function createKomaBackend(config: KomaConfig = {}, dependencies: KomaDep
         await runStore.update(record.id, {
           state: "completed",
           exitCode: 0,
+          signal: null,
           resultText: text,
           finishedAt: new Date().toISOString(),
         });
-        return { state: "completed", text };
+        return { state: "completed", text, exitCode: 0, signal: null };
       } catch (error) {
         const cancelled = session.cancelled;
         const state = cancelled ? "cancelled" : "failed";
         await runStore
           .update(record.id, {
             state,
+            exitCode: 1,
+            signal: cancelled ? "SIGTERM" : null,
             finishedAt: new Date().toISOString(),
             ...(cancelled ? {} : { errorText: redact((error as Error).message) }),
           })
           .catch(() => {});
-        return { state, text: "", ...(cancelled ? {} : { error: redact((error as Error).message) }) };
+        return {
+          state,
+          text: "",
+          exitCode: 1,
+          signal: cancelled ? "SIGTERM" : null,
+          ...(cancelled ? {} : { error: redact((error as Error).message) }),
+        };
       } finally {
         sessions.delete(record.id);
         await closeSession(session);
@@ -189,8 +195,10 @@ export function createKomaBackend(config: KomaConfig = {}, dependencies: KomaDep
         state: string;
         text: string;
         error?: string;
+        exitCode: number;
+        signal?: string | null;
       };
-      return { runId, ...result } as any;
+      return { runId, ...result, signal: result.signal ?? null } as any;
     }
     const record = await runStore.get(runId);
     if (!record) throw new Error(`No koma run found for ID ${runId}`);
@@ -199,6 +207,8 @@ export function createKomaBackend(config: KomaConfig = {}, dependencies: KomaDep
       state: record.state,
       text: record.resultText ?? "",
       error: record.errorText ?? "",
+      exitCode: record.exitCode,
+      signal: record.signal ?? null,
     };
   }
 
@@ -222,7 +232,14 @@ export function createKomaBackend(config: KomaConfig = {}, dependencies: KomaDep
     // Settle the completion before returning: koma runs have no status poll, so
     // the recorded state and the session tracker must reach a terminal value here.
     await (session.completion as Promise<unknown>).catch(() => undefined);
-    return { runId, state: "cancelled", cancelled: true };
+    const record = await runStore.get(runId);
+    return {
+      runId,
+      state: (record?.state as string) ?? "cancelled",
+      exitCode: typeof record?.exitCode === "number" ? record.exitCode : undefined,
+      signal: typeof record?.signal === "string" ? record.signal : "SIGTERM",
+      cancelled: true,
+    };
   }
 
   return { start, wait, cancel, runForeground };
@@ -468,8 +485,5 @@ function tail(text: string): string {
 }
 
 function redact(text: unknown): string {
-  return SECRET_PATTERNS.reduce(
-    (value: string, [pattern, replacement]) => value.replace(pattern, replacement),
-    String(text ?? ""),
-  );
+  return redactSecrets(text);
 }

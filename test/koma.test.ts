@@ -236,6 +236,8 @@ describe("koma sdk backend", () => {
       runId: started.runId,
       state: "completed",
       text: "DONE_KOMA",
+      exitCode: 0,
+      signal: null,
     });
 
     const record = await runStore.get(started.runId);
@@ -259,10 +261,12 @@ describe("koma sdk backend", () => {
     const { backend, runStore } = await makeBackend(() => fakeChild({ respond: adapter.respond }));
 
     const started = await backend.start({ cwd: "/workspace", prompt: "do the work" });
-    await expect(backend.cancel(started.runId)).resolves.toEqual({
+    const cancelResult = await backend.cancel(started.runId);
+    expect(cancelResult).toMatchObject({
       runId: started.runId,
       state: "cancelled",
       cancelled: true,
+      signal: "SIGTERM",
     });
     expect(adapter.requests.find((r) => r.method === "interrupt").params).toEqual({
       turn_id: "turn-1",

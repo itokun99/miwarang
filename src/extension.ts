@@ -7,6 +7,7 @@ import { createKomaBackend } from "./backends/koma.ts";
 import { executeDelegate } from "./delegate-routing.ts";
 import { RunStore } from "./runs/store.ts";
 import { registerRunTools } from "./run-tools.ts";
+import { buildEnvelope } from "./envelope.ts";
 import {
   createRunTracker,
   formatStatusLine,
@@ -15,6 +16,7 @@ import {
 import type { MiwarangConfig, BackendConfig } from "./config.ts";
 import type { BackendAdapter, DelegateRequest } from "./delegate-routing.ts";
 import type { RunTracker, TrackedRun } from "./watch.ts";
+import type { StreamSink } from "./stream.ts";
 
 const STATUS_POLL_MS = 15_000;
 
@@ -144,16 +146,27 @@ export function setupExtension(
         cwd?: string;
       },
       _signal: unknown,
-      _onUpdate: unknown,
+      onUpdate: unknown,
       ctx?: PiContext,
     ) {
+      const sink: StreamSink | undefined =
+        typeof onUpdate === "function" ? (onUpdate as StreamSink) : undefined;
       const execution = await executeDelegate(config, backends, {
         prompt: params.prompt,
         mode: params.mode ?? "foreground",
         backend: params.backend,
         cwd: params.cwd ?? ctx?.cwd ?? pi.cwd ?? process.cwd(),
+        onUpdate: sink,
       } as DelegateRequest);
       const { result, selected, mode, resolvedVia } = execution;
+      const envelope = buildEnvelope({
+        result,
+        backend: selected.backendId,
+        agent: selected.agent,
+        fallbackIndex: selected.index,
+        resolvedVia,
+        mode,
+      });
 
       if (mode === "background") {
         const id = result.sessionId ?? result.runId;
@@ -170,26 +183,14 @@ export function setupExtension(
         return {
           content: [{ type: "text", text }],
           details: {
-            ...result,
-            backend: selected.backendId,
-            resolvedVia,
+            ...envelope,
             ...(omoThreadId !== undefined ? { omoThreadId } : {}),
-            ...(selected.agent === undefined ? {} : { agent: selected.agent }),
-            ...(selected.index > 0
-              ? { fallback: true, fallbackIndex: selected.index }
-              : {}),
           },
         };
       }
       return {
-        content: [{ type: "text", text: result.text }],
-        details: {
-          sessionId: result.sessionId,
-          backend: selected.backendId,
-          resolvedVia,
-          ...(selected.agent === undefined ? {} : { agent: selected.agent }),
-          ...(selected.index > 0 ? { fallback: true, fallbackIndex: selected.index } : {}),
-        },
+        content: [{ type: "text", text: result.text ?? "" }],
+        details: envelope,
       };
     },
   });

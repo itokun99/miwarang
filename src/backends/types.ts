@@ -4,6 +4,7 @@ export interface BackendResult {
   text?: string;
   state?: string;
   exitCode?: number;
+  signal?: string | null;
   [key: string]: any;
 }
 

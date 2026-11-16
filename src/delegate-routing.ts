@@ -14,6 +14,7 @@ export interface DelegateRequest {
   mode: "foreground" | "background";
   backend?: string;
   cwd?: string;
+  onUpdate?: (delta: string) => void;
 }
 
 export interface DelegateResult {
@@ -62,6 +63,7 @@ export async function executeDelegate(
     const backendRequest = {
       cwd,
       prompt,
+      onUpdate: request.onUpdate,
       ...(backend.agent !== undefined ? { agent: backend.agent } : {}),
     };
     try {
