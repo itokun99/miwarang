@@ -27,10 +27,13 @@ if [ ! -e "$wrapper" ]; then
 fi
 ```
 
+The extension is written in TypeScript and executed directly by Bun; a thin
+`src/extension.js` shim keeps the installed wrapper working without changes.
+
 Restart Senpi or run `/reload` to load the extension. Once the global wrapper exists, start Senpi normally; do not also pass `-e` for the same extension or Senpi will register its tools twice. Before installing the wrapper, a one-off test can use:
 
 ```sh
-senpi -e ~/Projects/miwarang/src/extension.js
+senpi -e ~/Projects/miwarang/src/extension.ts
 ```
 
 Set `MIWARANG_CONFIG` to use a different config file. Without it, the extension reads `~/.config/miwarang/config.json`.
@@ -357,6 +360,7 @@ Miwarang Senpi Delegate is distributed under the MIT License. See [LICENSE](LICE
 
 ```sh
 bun test
-senpi -e ./src/extension.js --list-models
+bunx tsc --noEmit
+senpi -e ./src/extension.ts --list-models
 opencode api GET /api/model
 ```

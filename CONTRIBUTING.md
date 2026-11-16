@@ -16,6 +16,7 @@ Install dependencies and run the tests:
 ```sh
 bun install
 bun test
+bunx tsc --noEmit
 ```
 
 For changes to OpenCode integration, also test with a local OpenCode v2 service and a model available in its authenticated catalog. Do not hardcode credentials or OpenCode-specific headers; use the local `opencode api` command.
@@ -23,7 +24,7 @@ For changes to OpenCode integration, also test with a local OpenCode v2 service 
 ## Adding a backend
 
 - Add a backend adapter under `src/backends/`.
-- Register its backend type in `src/extension.js`.
+- Register its backend type in `src/extension.ts`.
 - Use executable-plus-argv invocation for command-line tools; do not interpolate prompts into a shell command.
 - Add tests for argument construction, foreground results, background tracking, and cancellation.
 - Update `config.example.json` and the README with the backend configuration.
