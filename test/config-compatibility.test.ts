@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { resolveRoute, resolveTargetRoute, validateConfig } from "../src/config.js";
+import { resolveRoute, resolveTargetRoute, validateConfig } from "../src/config.ts";
 
 describe("configuration example", () => {
   test("config.example.json satisfies the current config contract", async () => {

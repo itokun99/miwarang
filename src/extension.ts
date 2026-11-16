@@ -1,43 +1,75 @@
 import { Type } from "typebox";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "./config.js";
-import { createCommandBackend } from "./backends/command.js";
-import { createKomaBackend } from "./backends/koma.js";
-import { createOpenCodeBackend } from "./backends/opencode.js";
-import { executeDelegate } from "./delegate-routing.js";
-import { registerNativeTaskHook } from "./native-task.js";
-import { RunStore } from "./runs/store.js";
-import { registerRunTools } from "./run-tools.js";
+import { loadConfig } from "./config.ts";
+import { createCommandBackend } from "./backends/command.ts";
+import { createKomaBackend } from "./backends/koma.ts";
+import { createOpenCodeBackend } from "./backends/opencode.ts";
+import { executeDelegate } from "./delegate-routing.ts";
+import { registerNativeTaskHook } from "./native-task.ts";
+import { RunStore } from "./runs/store.ts";
+import { registerRunTools } from "./run-tools.ts";
 import {
   createRunTracker,
   formatStatusLine,
   isTerminalState,
-} from "./watch.js";
+} from "./watch.ts";
+import type { MiwarangConfig, BackendConfig } from "./config.ts";
+import type { BackendAdapter, DelegateRequest } from "./delegate-routing.ts";
+import type { RunTracker, TrackedRun } from "./watch.ts";
 
-// How often the footer status line re-reads command run records while a run is
-// alive. Opencode sessions have no cheap state probe, so only command runs
-// drive this interval.
 const STATUS_POLL_MS = 15_000;
 
-export default async function miwarangExtension(pi) {
+export interface PiContext {
+  cwd?: string;
+  ui?: {
+    setStatus?: (id: string, line: string | undefined) => void;
+    notify?: (message: string, level?: string) => void;
+  };
+  [key: string]: unknown;
+}
+
+export interface PiHost {
+  cwd?: string;
+  registerTool(definition: unknown): void;
+  registerCommand?(name: string, definition: unknown): void;
+  on?(event: string, handler: (event: unknown) => unknown): void;
+  [key: string]: unknown;
+}
+
+interface Clock {
+  setInterval: typeof setInterval;
+  clearInterval: typeof clearInterval;
+}
+
+interface ExtensionOptions {
+  config: MiwarangConfig;
+  backends?: Record<string, BackendAdapter>;
+  runStore?: RunStore;
+  timers?: Clock;
+}
+
+export default async function miwarangExtension(pi: PiHost): Promise<void> {
   const configPath =
     process.env.MIWARANG_CONFIG ?? join(homedir(), ".config/miwarang/config.json");
   const config = await loadConfig(configPath);
   setupExtension(pi, { config });
 }
 
-export function setupExtension(pi, { config, backends: injectedBackends, runStore, timers } = {}) {
+export function setupExtension(
+  pi: PiHost,
+  { config, backends: injectedBackends, runStore, timers }: ExtensionOptions,
+): void {
   const store = runStore ?? new RunStore({ directory: config.runsDirectory });
   const backends = injectedBackends ?? createBackends(config, store);
-  const tracker = createRunTracker({
-    readCommandState: async (id) => (await store.get(id))?.state,
+  const tracker: RunTracker = createRunTracker({
+    readCommandState: async (id) => (await store.get(id))?.state as string | undefined,
   });
   const clock = timers ?? { setInterval, clearInterval };
-  let statusTimer;
-  let statusCtx;
+  let statusTimer: ReturnType<typeof setInterval> | undefined;
+  let statusCtx: PiContext | undefined;
 
-  function syncStatus(ctx) {
+  function syncStatus(ctx?: PiContext) {
     statusCtx = ctx ?? statusCtx;
     const runs = tracker.list();
     if (typeof statusCtx?.ui?.setStatus === "function") {
@@ -127,7 +159,21 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         }),
       ),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(
+      _toolCallId: string,
+      params: {
+        target: string;
+        prompt: string;
+        mode?: "foreground" | "background";
+        backend?: string;
+        model?: string;
+        agent?: string;
+        cwd?: string;
+      },
+      _signal: unknown,
+      _onUpdate: unknown,
+      ctx?: PiContext,
+    ) {
       const target = normalizeTarget(params.target);
       const execution = await executeDelegate(config, backends, {
         target,
@@ -137,7 +183,7 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
         model: params.model,
         agent: params.agent,
         cwd: params.cwd ?? ctx?.cwd ?? pi.cwd ?? process.cwd(),
-      });
+      } as DelegateRequest);
       const {
         result,
         selected,
@@ -148,14 +194,14 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
       if (mode === "background") {
         const id = result.sessionId ?? result.runId;
         tracker.track({
-          id,
+          id: id as string,
           backend: selected.backendId,
           backendType: selected.candidate.backend.type,
           target,
           startedAt: Date.now(),
-        });
+        } as TrackedRun);
         syncStatus(ctx);
-        let text = `Started ${target} in background (${id}).`;
+        const text = `Started ${target} in background (${id}).`;
         return {
           content: [{ type: "text", text }],
           details: {
@@ -184,17 +230,17 @@ export function setupExtension(pi, { config, backends: injectedBackends, runStor
     },
   });
 
-  registerRunTools(pi, { config, backends, store, tracker, syncStatus });
-  registerNativeTaskHook(pi, config);
+  registerRunTools(pi as any, { config, backends: backends as Record<string, BackendAdapter>, store, tracker, syncStatus });
+  registerNativeTaskHook(pi as never, config);
 }
 
-function createBackends(config, store = new RunStore({ directory: config.runsDirectory })) {
-  const backends = {};
+function createBackends(config: MiwarangConfig, store: RunStore = new RunStore({ directory: config.runsDirectory })) {
+  const backends: Record<string, BackendAdapter> = {};
   for (const [id, backend] of Object.entries(config.backends)) {
     if (backend.type === "opencode-v2") {
       backends[id] = createOpenCodeBackend({ command: backend.command });
     } else if (backend.type === "command") {
-      backends[id] = createCommandBackend({ ...backend, id }, { runStore: store });
+      backends[id] = createCommandBackend({ ...backend, id } as never, { runStore: store });
     } else if (backend.type === "koma-sdk") {
       backends[id] = createKomaBackend({ ...backend, id }, { runStore: store });
     } else {
@@ -204,7 +250,7 @@ function createBackends(config, store = new RunStore({ directory: config.runsDir
   return backends;
 }
 
-function normalizeTarget(target) {
+function normalizeTarget(target: string): string {
   if (typeof target !== "string") throw new Error("Delegation target must be a string");
   if (target.startsWith("category:") || target.startsWith("agent:")) return target;
   throw new Error("Delegation target must use category:<name> or agent:<name>");

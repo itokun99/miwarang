@@ -1,7 +1,43 @@
 import { Type } from "typebox";
-import { formatRunTable } from "./watch.js";
+import { formatRunTable } from "./watch.ts";
+import type { RunTracker } from "./watch.ts";
+import type { MiwarangConfig } from "./config.ts";
+import type { RunStore } from "./runs/store.ts";
 
-export function registerRunTools(pi, { config, backends, store, tracker, syncStatus }) {
+interface WaitCancelResult {
+  text?: string;
+  state?: string;
+  interrupted?: unknown;
+  [key: string]: unknown;
+}
+
+interface BackendLike {
+  wait?: (id: string) => Promise<WaitCancelResult>;
+  cancel?: (id: string) => Promise<WaitCancelResult>;
+  [key: string]: any;
+}
+
+interface RunToolsOptions {
+  config: MiwarangConfig;
+  backends: Record<string, BackendLike>;
+  store: RunStore;
+  tracker: RunTracker;
+  syncStatus: (ctx?: any) => void;
+}
+
+interface PiContext {
+  ui?: { notify?: (message: string, level?: string) => void };
+  [key: string]: unknown;
+}
+
+interface PiHost {
+  registerTool(definition: unknown): void;
+  registerCommand(name: string, definition: unknown): void;
+}
+
+type WaitCancelParams = { sessionId: string; backend?: string } | { runId: string; backend?: string };
+
+export function registerRunTools(pi: PiHost, { config, backends, store, tracker, syncStatus }: RunToolsOptions): void {
   pi.registerTool({
     name: "miwarang_wait",
     label: "Wait for delegated task",
@@ -16,10 +52,12 @@ export function registerRunTools(pi, { config, backends, store, tracker, syncSta
         backend: Type.Optional(Type.String()),
       }),
     ]),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId: string, params: WaitCancelParams, _signal: unknown, _onUpdate: unknown, ctx?: PiContext) {
       const id = delegatedId(params);
       const backendId = await backendForRun(config, id, params.backend, store);
-      const result = await backends[backendId].wait(id);
+      const backend = backends[backendId];
+      if (!backend?.wait) throw new Error(`Backend ${backendId} does not support wait`);
+      const result = await backend.wait(id);
       tracker.resolve(id, result.state ?? "completed");
       syncStatus(ctx);
       return {
@@ -43,10 +81,12 @@ export function registerRunTools(pi, { config, backends, store, tracker, syncSta
         backend: Type.Optional(Type.String()),
       }),
     ]),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId: string, params: WaitCancelParams, _signal: unknown, _onUpdate: unknown, ctx?: PiContext) {
       const id = delegatedId(params);
       const backendId = await backendForRun(config, id, params.backend, store);
-      const result = await backends[backendId].cancel(id);
+      const backend = backends[backendId];
+      if (!backend?.cancel) throw new Error(`Backend ${backendId} does not support cancel`);
+      const result = await backend.cancel(id);
       tracker.resolve(id, result.state ?? "cancelled");
       syncStatus(ctx);
       return {
@@ -58,15 +98,20 @@ export function registerRunTools(pi, { config, backends, store, tracker, syncSta
 
   pi.registerCommand("miwarang", {
     description: "Show the miwarang background runs tracked in this session",
-    handler: async (_args, ctx) => {
+    handler: async (_args: unknown, ctx: PiContext) => {
       await tracker.refresh();
       syncStatus(ctx);
-      ctx.ui.notify(formatRunTable(tracker.list()), "info");
+      ctx.ui?.notify?.(formatRunTable(tracker.list()), "info");
     },
   });
 }
 
-export async function backendForRun(config, runId, requestedBackend, store) {
+export async function backendForRun(
+  config: MiwarangConfig,
+  runId: string,
+  requestedBackend: string | undefined,
+  store: RunStore,
+): Promise<string> {
   if (requestedBackend) {
     if (!config.backends[requestedBackend]) {
       throw new Error(`Backend ${requestedBackend} is not configured`);
@@ -90,8 +135,8 @@ export async function backendForRun(config, runId, requestedBackend, store) {
   throw new Error(`Cannot determine backend for run ID ${runId}`);
 }
 
-function delegatedId(params) {
-  const id = params.sessionId ?? params.runId;
+function delegatedId(params: WaitCancelParams): string {
+  const id = (params as { sessionId?: unknown }).sessionId ?? (params as { runId?: unknown }).runId;
   if (typeof id !== "string" || !id) {
     throw new Error("Provide a sessionId or runId returned by miwarang_delegate");
   }

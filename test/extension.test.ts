@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { invoke, makeHarness } from "./support/extension-harness.js";
+import { invoke, makeHarness } from "./support/extension-harness.ts";
 
 describe("Senpi extension registration", () => {
   test("registers the delegation lifecycle tools", () => {

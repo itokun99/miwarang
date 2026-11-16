@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createOpenCodeBackend, runOpenCodeCli } from "../src/backends/opencode.js";
+import { createOpenCodeBackend, runOpenCodeCli } from "../src/backends/opencode.ts";
 
 function jsonResponse(value) {
   return { stdout: JSON.stringify(value), stderr: "", exitCode: 0 };

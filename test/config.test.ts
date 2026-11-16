@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { resolveRoute } from "../src/config.js";
+import { resolveRoute } from "../src/config.ts";
 
 const liveModels = [
   {

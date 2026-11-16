@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { resolveTargetRoute, validateConfig } from "../src/config.js";
+import { resolveTargetRoute, validateConfig } from "../src/config.ts";
 
 const opencodeBackend = { opencode: { type: "opencode-v2", command: "opencode" } };
 const commandBackend = { commandcode: { type: "command", command: "commandcode" } };

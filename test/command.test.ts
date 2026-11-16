@@ -5,7 +5,7 @@ import {
   buildCommandInvocation,
   createCommandBackend,
   parseCommandModelList,
-} from "../src/backends/command.js";
+} from "../src/backends/command.ts";
 
 describe("Command Code agent tool configuration", () => {
   test("enables the harness agent tools for the headless backend", async () => {

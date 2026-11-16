@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { invoke, makeHarness, uiRecorder, wildcardOverrideConfig } from "./support/extension-harness.js";
+import { invoke, makeHarness, uiRecorder, wildcardOverrideConfig } from "./support/extension-harness.ts";
 
 describe("progress surfaces", () => {
   test("the status line shows a run on start and clears after wait", async () => {

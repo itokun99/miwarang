@@ -1,12 +1,64 @@
 import { readFile } from "node:fs/promises";
 
-export async function loadConfig(path) {
-  const config = JSON.parse(await readFile(path, "utf8"));
+export interface LiveModel {
+  id?: unknown;
+  providerID?: unknown;
+  [key: string]: unknown;
+}
+
+export interface BackendConfig {
+  type: string;
+  command?: string;
+  [key: string]: unknown;
+}
+
+export interface RouteConfig {
+  backend: string;
+  models?: string[];
+  agent?: string;
+  blockNativeTask?: boolean | "all" | string[];
+  fallbacks?: RouteConfig[];
+  [key: string]: unknown;
+}
+
+export interface MiwarangConfig {
+  backends: Record<string, BackendConfig>;
+  routes: Record<string, RouteConfig>;
+  defaultRoute?: RouteConfig;
+  defaultModels?: string[];
+  blockNativeTask?: boolean | "all" | string[];
+  pricePolicy?: string;
+  runsDirectory?: string;
+  [key: string]: unknown;
+}
+
+export type ResolvedRoute = Omit<RouteConfig, "backend"> & {
+  backend: BackendConfig;
+  backendName: string;
+  target: string;
+  key: string;
+  models: string[];
+  fallbacks: ResolvedRoute[];
+};
+
+export interface RouteOverride {
+  model?: string;
+  agent?: string;
+  [key: string]: unknown;
+}
+
+export async function loadConfig(path: string): Promise<MiwarangConfig> {
+  const config = JSON.parse(await readFile(path, "utf8")) as MiwarangConfig;
   validateConfig(config);
   return config;
 }
 
-export function resolveRoute(config, target, liveModels, overrides = {}) {
+export function resolveRoute(
+  config: MiwarangConfig,
+  target: string,
+  liveModels: LiveModel[],
+  overrides: RouteOverride = {},
+): { backend: BackendConfig; target: string; model: string; agent?: string } {
   const route = config.routes?.[target];
   if (!route) throw new Error(`No route configured for ${target}`);
 
@@ -28,7 +80,7 @@ export function resolveRoute(config, target, liveModels, overrides = {}) {
       }
       continue;
     }
-    const result = {
+    const result: { backend: BackendConfig; target: string; model: string; agent?: string } = {
       backend,
       target,
       model: modelId,
@@ -41,7 +93,11 @@ export function resolveRoute(config, target, liveModels, overrides = {}) {
   throw new Error(`No configured model is available for ${target}`);
 }
 
-export function resolveTargetRoute(config, target, { backend } = {}) {
+export function resolveTargetRoute(
+  config: MiwarangConfig,
+  target: string,
+  { backend }: { backend?: string } = {},
+): ResolvedRoute {
   if (typeof target !== "string" || target.length === 0) {
     throw new Error("Target must be a non-empty string");
   }
@@ -54,8 +110,8 @@ export function resolveTargetRoute(config, target, { backend } = {}) {
   if (target.startsWith("category:")) keys.push("category:*");
   else if (target.startsWith("agent:")) keys.push("agent:*");
 
-  let route;
-  let key;
+  let route: RouteConfig | undefined;
+  let key: string | undefined;
   for (const candidate of keys) {
     if (routes && typeof routes === "object" && routes[candidate]) {
       route = routes[candidate];
@@ -86,14 +142,14 @@ export function resolveTargetRoute(config, target, { backend } = {}) {
     throw new Error(`Backend ${backendName} configured for ${target} does not exist`);
   }
   const fallbacks =
-    backend === undefined ? resolveFallbackRoutes(config, route, target, key) : [];
+    backend === undefined ? resolveFallbackRoutes(config, route, target, key as string) : [];
 
   return {
     ...backendRoute,
     backend: backendObj,
     backendName,
     target,
-    key,
+    key: key as string,
     models:
       backendRoute.models ??
       (backendObj.type === "opencode-v2" ? [] : config?.defaultModels ?? []),
@@ -103,7 +159,12 @@ export function resolveTargetRoute(config, target, { backend } = {}) {
 
 const PRICE_POLICIES = ["free-only", "free-first", "any"];
 
-function validateRouteShape(name, route, config, allowFallbacks = true) {
+function validateRouteShape(
+  name: string,
+  route: RouteConfig,
+  config: MiwarangConfig,
+  allowFallbacks = true,
+): void {
   if (!route || typeof route.backend !== "string") {
     throw new Error(`Route ${name} must name a backend`);
   }
@@ -137,13 +198,13 @@ function validateRouteShape(name, route, config, allowFallbacks = true) {
   }
 }
 
-function validateBlockNativeTask(value, where) {
+function validateBlockNativeTask(value: boolean | "all" | string[], where: string): void {
   if (typeof value === "boolean" || value === "all") return;
   if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) return;
   throw new Error(`${where} blockNativeTask must be a boolean, "all", or a string array`);
 }
 
-export function validateConfig(config) {
+export function validateConfig(config: MiwarangConfig): void {
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     throw new Error("Miwarang config must be a JSON object");
   }
@@ -199,7 +260,7 @@ export function validateConfig(config) {
 
 }
 
-function modelIdFor(model) {
+function modelIdFor(model: LiveModel): string {
   if (!model || typeof model.id !== "string" || model.id === "") return "";
   // Command CLIs list some models without a provider prefix; the bare id is
   // then the whole identifier and must match the configured candidate as-is.
@@ -208,7 +269,12 @@ function modelIdFor(model) {
     : model.id;
 }
 
-function resolveFallbackRoutes(config, route, target, key) {
+function resolveFallbackRoutes(
+  config: MiwarangConfig,
+  route: RouteConfig,
+  target: string,
+  key: string,
+): ResolvedRoute[] {
   if (!Array.isArray(route.fallbacks)) return [];
   return route.fallbacks.map((fallback, index) => {
     const backendName = fallback.backend;

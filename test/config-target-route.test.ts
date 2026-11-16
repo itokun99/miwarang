@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { resolveTargetRoute } from "../src/config.js";
+import { resolveTargetRoute } from "../src/config.ts";
 
 const qaBackends = {
   opencode: { type: "opencode-v2", command: "opencode" },

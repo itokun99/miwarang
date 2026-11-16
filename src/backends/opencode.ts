@@ -5,12 +5,47 @@ const execFile = promisify(execFileCallback);
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
+interface CliResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+interface CliRunOptions {
+  timeoutMs?: number;
+}
+
+interface RunFn {
+  (args: string[], options: { timeoutMs: number }): Promise<CliResult>;
+}
+
+export interface OpenCodeBackendOptions {
+  command?: string;
+  run?: RunFn;
+}
+
+interface ApiMessage {
+  info?: { role?: string };
+  role?: string;
+  type?: string;
+  time?: { completed?: number; created?: number };
+  error?: unknown;
+  parts?: unknown;
+  content?: unknown;
+  text?: unknown;
+}
+
 export function createOpenCodeBackend({
   command = "opencode",
   run = (args, options) => runOpenCodeCli(command, args, options),
-} = {}) {
-  async function request(method, path, body, timeoutMs = DEFAULT_TIMEOUT_MS) {
-    const args = ["api"];
+}: OpenCodeBackendOptions = {}) {
+  async function request(
+    method: string,
+    path: string,
+    body?: unknown,
+    timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  ): Promise<any> {
+    const args: string[] = ["api"];
     if (body !== undefined) args.push("--data", JSON.stringify(body));
     args.push(method, path);
 
@@ -27,7 +62,7 @@ export function createOpenCodeBackend({
     }
   }
 
-  async function listModels() {
+  async function listModels(): Promise<any[]> {
     const payload = await request("GET", "/api/model");
     const data = payload?.data;
     if (!Array.isArray(data)) {
@@ -44,7 +79,7 @@ export function createOpenCodeBackend({
     return retryData;
   }
 
-  async function start({ cwd, target, prompt }) {
+  async function start({ cwd, target, prompt }: { cwd?: string; target: string; prompt: string }) {
     const createBody = {
       location: { directory: cwd },
       title: `Miwarang: ${target}`,
@@ -57,16 +92,14 @@ export function createOpenCodeBackend({
       throw new Error("OpenCode session creation returned no session ID");
     }
 
-    await request(
-      "POST",
-      `/api/session/${encodeURIComponent(sessionId)}/prompt`,
-      { text: prompt },
-    );
+    await request("POST", `/api/session/${encodeURIComponent(sessionId)}/prompt`, {
+      text: prompt,
+    });
 
     return { sessionId, state: "running" };
   }
 
-  async function wait(sessionId) {
+  async function wait(sessionId: string) {
     await request(
       "POST",
       `/api/experimental/session/${encodeURIComponent(sessionId)}/wait`,
@@ -79,18 +112,18 @@ export function createOpenCodeBackend({
     if (!Array.isArray(messages)) {
       throw new Error(`OpenCode session ${sessionId} returned no messages`);
     }
-    const isAssistant = (message) =>
+    const isAssistant = (message: ApiMessage) =>
       (message.info?.role ?? message.role ?? message.type) === "assistant";
-    const completedAt = (message) => message.time?.completed ?? message.time?.created ?? 0;
+    const completedAt = (message: ApiMessage) => message.time?.completed ?? message.time?.created ?? 0;
     // Messages arrive newest-first; pick the newest assistant step that has text.
-    const withText = [...messages]
+    const withText = [...(messages as ApiMessage[])]
       .filter(isAssistant)
       .sort((a, b) => completedAt(a) - completedAt(b))
       .reverse()
       .find((message) => messageText(message).length > 0);
     const text = withText ? messageText(withText) : "";
     if (!text) {
-      const failed = [...messages]
+      const failed = [...(messages as ApiMessage[])]
         .filter(isAssistant)
         .sort((a, b) => completedAt(b) - completedAt(a))
         .find((message) => message.error);
@@ -104,20 +137,17 @@ export function createOpenCodeBackend({
     return { sessionId, text };
   }
 
-  async function runForeground(input) {
+  async function runForeground(input: { cwd?: string; target: string; prompt: string }) {
     const run = await start(input);
     return wait(run.sessionId);
   }
 
-  async function cancel(sessionId) {
+  async function cancel(sessionId: string) {
     const response = await request(
       "POST",
       `/api/session/${encodeURIComponent(sessionId)}/interrupt`,
     );
-    return {
-      sessionId,
-      interrupted: response?.interrupted === true,
-    };
+    return { sessionId, interrupted: response !== undefined };
   }
 
   return { listModels, start, wait, runForeground, cancel };
@@ -128,25 +158,30 @@ export function createOpenCodeBackend({
 // status, and message lets callers classify the failure instead of guessing
 // from missing text; the delegate uses this shape to fail over to the next
 // configured candidate.
-function describeProviderError(error) {
+function describeProviderError(error: any): string {
   const parts = [error?.type ?? "provider error"];
   if (error?.status !== undefined) parts.push(`(${error.status})`);
   if (error?.message) parts.push(String(error.message));
   return parts.join(" ");
 }
 
-function messageText(message) {
+function messageText(message: ApiMessage): string {
   if (!message) return "";
   const parts = message.parts ?? message.content ?? message.text ?? [];
   if (typeof parts === "string") return parts;
-  return parts
+  if (!Array.isArray(parts)) return "";
+  return (parts as { type?: string; text?: string }[])
     .filter((part) => part?.type === "text" && typeof part.text === "string")
     .map((part) => part.text)
     .join("\n")
     .trim();
 }
 
-export async function runOpenCodeCli(command, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function runOpenCodeCli(
+  command: string,
+  args: string[],
+  { timeoutMs = DEFAULT_TIMEOUT_MS }: CliRunOptions = {},
+): Promise<CliResult> {
   try {
     const { stdout, stderr } = await execFile(command, args, {
       encoding: "utf8",
@@ -155,12 +190,19 @@ export async function runOpenCodeCli(command, args, { timeoutMs = DEFAULT_TIMEOU
     });
     return { stdout, stderr, exitCode: 0 };
   } catch (error) {
-    const timedOut = error.killed === true || error.signal != null;
-    const code = Number.isInteger(error.code) ? error.code : timedOut ? 124 : 1;
+    const err = error as NodeJS.ErrnoException & {
+      killed?: boolean;
+      signal?: string | null;
+      code?: number | string;
+      stdout?: string;
+      stderr?: string;
+    };
+    const timedOut = err.killed === true || err.signal != null;
+    const code = Number.isInteger(err.code) ? Number(err.code) : timedOut ? 124 : 1;
     return {
-      stdout: error.stdout ?? "",
+      stdout: err.stdout ?? "",
       stderr:
-        String(error.stderr ?? "") || (timedOut ? `killed by ${error.signal ?? "timeout"}` : ""),
+        String(err.stderr ?? "") || (timedOut ? `killed by ${err.signal ?? "timeout"}` : ""),
       exitCode: code,
     };
   }

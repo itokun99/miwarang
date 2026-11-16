@@ -6,7 +6,7 @@ import {
   makeHarness,
   wildcardConfig,
   wildcardOverrideConfig,
-} from "./support/extension-harness.js";
+} from "./support/extension-harness.ts";
 
 describe("delegate routing", () => {
   test("OpenCode uses its configured session defaults without querying its catalog", async () => {

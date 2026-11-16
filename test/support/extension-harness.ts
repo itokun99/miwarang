@@ -1,4 +1,4 @@
-import { setupExtension } from "../../src/extension.js";
+import { setupExtension } from "../../src/extension.ts";
 
 export const config = {
   backends: {

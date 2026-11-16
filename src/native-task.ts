@@ -1,6 +1,24 @@
-import { resolveTargetRoute } from "./config.js";
+import { resolveTargetRoute } from "./config.ts";
+import type { MiwarangConfig } from "./config.ts";
 
-export function registerNativeTaskHook(pi, config) {
+interface ToolCallEvent {
+  toolName: string;
+  input?: unknown;
+}
+
+export interface BlockResult {
+  block: boolean;
+  reason: string;
+}
+
+export interface PiHost {
+  on(event: string, handler: (e: ToolCallEvent) => BlockResult | undefined): void;
+  registerTool(definition: unknown): void;
+  cwd?: string;
+  [key: string]: unknown;
+}
+
+export function registerNativeTaskHook(pi: PiHost, config: MiwarangConfig): void {
   pi.on("tool_call", (event) => {
     if (event.toolName !== "task") return;
     const blocked = taskTargets(event.input).filter((target) =>
@@ -21,18 +39,21 @@ export function registerNativeTaskHook(pi, config) {
   });
 }
 
-function taskTargets(input) {
+function taskTargets(input: unknown): string[] {
   if (!input || typeof input !== "object") return [];
-  const tasks = Array.isArray(input.tasks) ? input.tasks : [input];
+  const record = input as { tasks?: unknown };
+  const tasks = Array.isArray(record.tasks) ? record.tasks : [input];
   return tasks.flatMap((task) => {
-    if (typeof task.category === "string") return [`category:${task.category}`];
-    if (typeof task.subagent_type === "string") return [`agent:${task.subagent_type}`];
+    if (!task || typeof task !== "object") return [];
+    const t = task as { category?: unknown; subagent_type?: unknown };
+    if (typeof t.category === "string") return [`category:${t.category}`];
+    if (typeof t.subagent_type === "string") return [`agent:${t.subagent_type}`];
     return [];
   });
 }
 
-function shouldBlockNativeTask(config, target) {
-  let resolved;
+function shouldBlockNativeTask(config: MiwarangConfig, target: string): boolean {
+  let resolved: ReturnType<typeof resolveTargetRoute>;
   try {
     resolved = resolveTargetRoute(config, target);
   } catch {
@@ -41,10 +62,10 @@ function shouldBlockNativeTask(config, target) {
   if (resolved.key === "defaultRoute") return false;
 
   const flag = resolved.blockNativeTask ?? config.blockNativeTask ?? "configured";
-  return blockNativeTaskCovers(flag, target);
+  return blockNativeTaskCovers(flag as boolean | string | string[], target);
 }
 
-function blockNativeTaskCovers(flag, target) {
+function blockNativeTaskCovers(flag: boolean | string | string[] | undefined, target: string): boolean {
   if (flag === false || flag === "none") return false;
   if (flag === true || flag === "all" || flag === "configured") return true;
   if (Array.isArray(flag)) {
@@ -53,7 +74,7 @@ function blockNativeTaskCovers(flag, target) {
   return false;
 }
 
-function namespaceWildcard(target) {
+function namespaceWildcard(target: string): string {
   if (target.startsWith("category:")) return "category:*";
   if (target.startsWith("agent:")) return "agent:*";
   return target;

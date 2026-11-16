@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { runOpenCodeCli } from "../src/backends/opencode.js";
+import { runOpenCodeCli } from "../src/backends/opencode.ts";
 
 describe("OpenCode CLI process adapter", () => {
   test("reports a timed-out CLI run as exit 124 and keeps stderr", async () => {

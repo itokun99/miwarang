@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { configuredCommandModels } from "../src/delegate-routing.js";
-import { invoke, makeHarness } from "./support/extension-harness.js";
+import { configuredCommandModels } from "../src/delegate-routing.ts";
+import { invoke, makeHarness } from "./support/extension-harness.ts";
 
 const probeConfig = {
   backends: {

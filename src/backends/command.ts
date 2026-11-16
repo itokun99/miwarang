@@ -1,14 +1,46 @@
 import { spawn as spawnProcess } from "node:child_process";
-import { RunStore } from "../runs/store.js";
+import { RunStore } from "../runs/store.ts";
 
 const MAX_CAPTURE_BYTES = 1024 * 1024;
 const LIST_MODELS_TIMEOUT_MS = 30_000;
-const SECRET_PATTERNS = [
+const SECRET_PATTERNS: RegExp[] = [
   /(Bearer\s+)[^\s"'`]+/gi,
   /((?:api[-_]?key|token|secret)\s*[:=]\s*)[^\s"'`]+/gi,
 ];
 
-export function buildCommandInvocation(config, request) {
+export interface CommandConfig {
+  command: string;
+  args: string[];
+  promptInput?: string;
+  timeoutMs?: number;
+  id?: string;
+  listModelsArgv?: string[];
+  [key: string]: unknown;
+}
+
+export interface CommandRequest {
+  prompt: string;
+  model?: string;
+  agent?: string;
+  cwd?: string;
+  target?: string;
+}
+
+export interface Invocation {
+  command: string;
+  args: string[];
+  cwd?: string;
+  input: string | undefined;
+  timeoutMs?: number;
+}
+
+interface CaptureResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+export function buildCommandInvocation(config: CommandConfig, request: CommandRequest): Invocation {
   if (typeof config.command !== "string" || !config.command) {
     throw new Error("Command backend must define a command");
   }
@@ -24,14 +56,14 @@ export function buildCommandInvocation(config, request) {
     throw new Error("Command backend promptInput must be stdin or argument");
   }
 
-  const values = {
+  const values: Record<string, unknown> = {
     model: request.model,
     agent: request.agent,
     cwd: request.cwd,
     target: request.target,
   };
   const args = config.args.map((arg) =>
-    arg.replace(/\{\{(model|agent|cwd|target)\}\}/g, (_match, key) => {
+    arg.replace(/\{\{(model|agent|cwd|target)\}\}/g, (_match: string, key: string) => {
       const value = values[key];
       if (typeof value !== "string") {
         throw new Error(`Command argument requires the ${key} value`);
@@ -57,13 +89,13 @@ export function buildCommandInvocation(config, request) {
 // have no description column and are skipped; ids ending in `:free`/`-free`
 // are zero-cost so freeOnly routes can target them. Tokens without a
 // provider prefix keep the bare id.
-export function parseCommandModelList(stdout) {
-  const models = [];
+export function parseCommandModelList(stdout: unknown) {
+  const models: unknown[] = [];
   for (const line of String(stdout ?? "").split("\n")) {
     const match = line.match(/^(\S+)(?: {2,}|\t)(\S)/);
-    if (!match) continue;
+    if (!match || !match[1]) continue;
     const token = match[1];
-    if (token.endsWith(":")) continue; // footer lines such as "Docs:  https://…"
+    if (token.endsWith(":")) continue;
     const slash = token.indexOf("/");
     const providerID = slash < 1 ? "" : token.slice(0, slash);
     const id = slash < 1 ? token : token.slice(slash + 1);
@@ -77,7 +109,21 @@ export function parseCommandModelList(stdout) {
   return models;
 }
 
-export function createCommandBackend(config, dependencies = {}) {
+interface CommandDependencies {
+  spawn?: typeof spawnProcess;
+  runStore?: RunStore;
+}
+
+interface ActiveRun {
+  child: ReturnType<typeof spawnProcess>;
+  cancelRequested: boolean;
+  completion: Promise<Record<string, unknown>>;
+}
+
+export function createCommandBackend(
+  config: CommandConfig,
+  dependencies: CommandDependencies = {},
+) {
   if (
     config.listModelsArgv !== undefined &&
     (!Array.isArray(config.listModelsArgv) ||
@@ -88,9 +134,9 @@ export function createCommandBackend(config, dependencies = {}) {
   }
   const spawn = dependencies.spawn ?? spawnProcess;
   const runStore = dependencies.runStore ?? new RunStore();
-  const active = new Map();
+  const active = new Map<string, ActiveRun>();
 
-  async function runForeground(request) {
+  async function runForeground(request: CommandRequest) {
     const invocation = buildCommandInvocation(config, request);
     const child = spawn(invocation.command, invocation.args, {
       cwd: invocation.cwd,
@@ -105,7 +151,7 @@ export function createCommandBackend(config, dependencies = {}) {
     return { text: completed.stdout, exitCode: 0 };
   }
 
-  async function start(request) {
+  async function start(request: CommandRequest) {
     const invocation = buildCommandInvocation(config, request);
     const record = await runStore.create({
       backend: config.id ?? "command",
@@ -121,7 +167,7 @@ export function createCommandBackend(config, dependencies = {}) {
       windowsHide: true,
     });
     const completed = captureChild(child, invocation.input);
-    const run = { child, cancelRequested: false };
+    const run = { child, cancelRequested: false } as ActiveRun;
     active.set(record.id, run);
 
     run.completion = completed
@@ -139,9 +185,9 @@ export function createCommandBackend(config, dependencies = {}) {
           finishedAt: new Date().toISOString(),
         });
         active.delete(record.id);
-        return updated;
+        return updated as Record<string, any>;
       })
-      .catch(async (error) => {
+      .catch(async (error: NodeJS.ErrnoException) => {
         active.delete(record.id);
         await runStore.update(record.id, {
           state: "failed",
@@ -159,7 +205,7 @@ export function createCommandBackend(config, dependencies = {}) {
     } catch (error) {
       run.cancelRequested = true;
       await run.completion.catch(() => {});
-      throw new Error(`Could not start configured command: ${sanitize(error.message)}`);
+      throw new Error(`Could not start configured command: ${sanitize((error as Error).message)}`);
     }
   }
 
@@ -181,23 +227,23 @@ export function createCommandBackend(config, dependencies = {}) {
     return models.length ? models : undefined;
   }
 
-  async function wait(runId) {
+  async function wait(runId: string) {
     const run = active.get(runId);
     if (run) {
       const record = await run.completion;
-      return runResult(record);
+      return runResult(record as Record<string, any>);
     }
     const record = await runStore.get(runId);
     if (!record) throw new Error(`No command run found for ID ${runId}`);
-    return runResult(record);
+    return runResult(record as Record<string, any>);
   }
 
-  async function cancel(runId) {
+  async function cancel(runId: string) {
     const run = active.get(runId);
     if (!run) {
       const record = await runStore.get(runId);
       if (!record) throw new Error(`No command run found for ID ${runId}`);
-      return { runId, state: record.state, cancelled: false };
+      return { runId, state: record.state as string, cancelled: false };
     }
 
     run.cancelRequested = true;
@@ -208,7 +254,7 @@ export function createCommandBackend(config, dependencies = {}) {
         run.child.kill("SIGTERM");
       }
     } catch (error) {
-      if (error.code !== "ESRCH") throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
     }
     return { runId, state: "cancelling", cancelled: true };
   }
@@ -216,32 +262,35 @@ export function createCommandBackend(config, dependencies = {}) {
   return { runForeground, start, wait, cancel, listModels };
 }
 
-function captureChild(child, input) {
-  return new Promise((resolve, reject) => {
+function captureChild(
+  child: ReturnType<typeof spawnProcess>,
+  input?: string | undefined,
+) {
+  return new Promise<CaptureResult>((resolve, reject) => {
     let stdout = "";
     let stderr = "";
     let settled = false;
 
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk) => {
+    child.stdout?.on("data", (chunk: string) => {
       stdout = appendCapped(stdout, chunk);
     });
-    child.stderr?.on("data", (chunk) => {
+    child.stderr?.on("data", (chunk: string) => {
       stderr = appendCapped(stderr, chunk);
     });
-    child.once("error", (error) => {
+    child.once("error", (error: NodeJS.ErrnoException) => {
       if (settled) return;
       settled = true;
       reject(error);
     });
-    child.once("close", (code, signal) => {
+    child.once("close", (code: number | null, signal: string | null) => {
       if (settled) return;
       settled = true;
       resolve({
         stdout: stdout.trim(),
         stderr: sanitize(stderr.trim()),
-        exitCode: Number.isInteger(code) ? code : signal ? 1 : 0,
+        exitCode: Number.isInteger(code) ? (code as number) : signal ? 1 : 0,
       });
     });
 
@@ -251,7 +300,7 @@ function captureChild(child, input) {
   });
 }
 
-function appendCapped(current, chunk) {
+function appendCapped(current: string, chunk: string): string {
   const remaining = MAX_CAPTURE_BYTES - Buffer.byteLength(current, "utf8");
   if (remaining <= 0) return current;
   const bytes = Buffer.from(chunk, "utf8");
@@ -259,20 +308,20 @@ function appendCapped(current, chunk) {
   return `${current}${bytes.subarray(0, remaining).toString("utf8")}\n[output truncated]`;
 }
 
-function waitForSpawn(child) {
+function waitForSpawn(child: ReturnType<typeof spawnProcess>): Promise<void> {
   return new Promise((resolve, reject) => {
-    child.once("spawn", resolve);
-    child.once("error", reject);
+    child.once("spawn", () => resolve());
+    child.once("error", (error: NodeJS.ErrnoException) => reject(error));
   });
 }
 
-function withTimeout(promise, timeoutMs, onTimeout) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
-  return new Promise((resolve, reject) => {
+function withTimeout<T>(promise: Promise<T>, timeoutMs: unknown, onTimeout: () => void): Promise<T> {
+  if (!Number.isFinite(timeoutMs as number) || (timeoutMs as number) <= 0) return promise;
+  return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       onTimeout();
       reject(new Error(`Command exceeded timeout of ${timeoutMs} ms`));
-    }, timeoutMs);
+    }, timeoutMs as number);
     promise.then(
       (value) => {
         clearTimeout(timer);
@@ -286,12 +335,12 @@ function withTimeout(promise, timeoutMs, onTimeout) {
   });
 }
 
-function commandFailure(result) {
+function commandFailure(result: CaptureResult): string {
   const detail = result.stderr ? `: ${result.stderr}` : "";
   return `Configured command failed with exit code ${result.exitCode}${detail}`;
 }
 
-function runResult(record) {
+function runResult(record: Record<string, any>) {
   return {
     runId: record.id,
     state: record.state,
@@ -301,9 +350,9 @@ function runResult(record) {
   };
 }
 
-function sanitize(text) {
+function sanitize(text: unknown): string {
   return SECRET_PATTERNS.reduce(
-    (value, pattern) => value.replace(pattern, "$1[redacted]"),
+    (value: string, pattern: RegExp) => value.replace(pattern, "$1[redacted]"),
     String(text ?? ""),
   );
 }

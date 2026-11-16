@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { backendForRun } from "../src/run-tools.js";
-import { invoke, makeHarness } from "./support/extension-harness.js";
+import { backendForRun } from "../src/run-tools.ts";
+import { invoke, makeHarness } from "./support/extension-harness.ts";
 
 const multiCommandConfig = {
   backends: {

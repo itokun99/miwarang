@@ -1,5 +1,5 @@
-import { spawn as spawnProcess } from "node:child_process";
-import { RunStore } from "../runs/store.js";
+import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
+import { RunStore } from "../runs/store.ts";
 
 // koma's headless one-shot (`koma run --prompt …`) prints only session
 // metadata; the assistant reply never reaches its stdout, so koma cannot back a
@@ -14,24 +14,64 @@ const PROTOCOL_VERSION = 1;
 const REQUIRED_CAPABILITIES = ["create", "submit", "detach"];
 const TERMINAL_TURN_STATES = new Set(["finished", "interrupted", "failed"]);
 const MAX_STDERR_BYTES = 64 * 1024;
-const SECRET_PATTERNS = [
+const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/(Bearer\s+)[^\s"'`]+/gi, "$1[redacted]"],
   [/((?:api[-_]?key|token|secret)\s*[:=]\s*)[^\s"'`]+/gi, "$1[redacted]"],
 ];
 
-export function createKomaBackend(config = {}, dependencies = {}) {
+export interface KomaConfig {
+  command?: string;
+  args?: string[];
+  timeoutMs?: number;
+  policy?: { plan: string; approval: string };
+  id?: string;
+  [key: string]: unknown;
+}
+
+interface KomaRequest {
+  cwd?: string;
+  prompt: string;
+  model?: string;
+}
+
+export interface KomaDependencies {
+  spawn?: typeof spawnProcess;
+  runStore?: RunStore;
+}
+
+interface Session {
+  child: ChildProcess;
+  connection: Connection;
+  workdir: string;
+  daemonSessionId: string;
+  turnId: string;
+  closed: boolean;
+  cancelled: boolean;
+  completion?: Promise<{ state: string; text: string; error?: string }>;
+}
+
+interface Connection {
+  hello(): Promise<any>;
+  request(method: string, params: unknown): Promise<any>;
+  waitForTurn(): Promise<any>;
+  write(payload: unknown): boolean;
+  detach(): void;
+  dispose(): void;
+}
+
+export function createKomaBackend(config: KomaConfig = {}, dependencies: KomaDependencies = {}) {
   const command = config.command ?? "koma";
   const args = Array.isArray(config.args) && config.args.length ? config.args : DEFAULT_ARGS;
   const timeoutMs =
-    Number.isFinite(config.timeoutMs) && config.timeoutMs > 0
-      ? config.timeoutMs
+    Number.isFinite(config.timeoutMs) && (config.timeoutMs as number) > 0
+      ? (config.timeoutMs as number)
       : DEFAULT_TIMEOUT_MS;
   const policy = config.policy ?? DEFAULT_POLICY;
   const spawn = dependencies.spawn ?? spawnProcess;
   const runStore = dependencies.runStore ?? new RunStore();
-  const sessions = new Map();
+  const sessions = new Map<string, Session>();
 
-  async function openSession({ cwd, prompt, model }) {
+  async function openSession({ cwd, prompt, model }: KomaRequest) {
     const workdir = typeof cwd === "string" && cwd ? cwd : process.cwd();
     const child = spawn(command, args, {
       cwd: workdir,
@@ -60,7 +100,7 @@ export function createKomaBackend(config = {}, dependencies = {}) {
         turnId: submitted.turn_id,
         closed: false,
         cancelled: false,
-      };
+      } as Session;
     } catch (error) {
       connection.dispose();
       throw error;
@@ -69,14 +109,14 @@ export function createKomaBackend(config = {}, dependencies = {}) {
 
   // Releases the adapter: an explicit detach, then stdin EOF and SIGTERM. Never
   // throws, so teardown cannot mask the result it is cleaning up after.
-  function closeSession(session) {
+  function closeSession(session: Session) {
     if (session.closed) return;
     session.closed = true;
     session.connection.detach();
     session.connection.dispose();
   }
 
-  async function runForeground(request) {
+  async function runForeground(request: KomaRequest) {
     const session = await openSession(request);
     try {
       const state = await session.connection.waitForTurn();
@@ -86,7 +126,7 @@ export function createKomaBackend(config = {}, dependencies = {}) {
     }
   }
 
-  async function start(request) {
+  async function start(request: KomaRequest) {
     const record = await runStore.create({
       backend: config.id ?? "koma",
       state: "starting",
@@ -94,13 +134,13 @@ export function createKomaBackend(config = {}, dependencies = {}) {
       command,
       startedAt: new Date().toISOString(),
     });
-    let session;
+    let session: Session;
     try {
       session = await openSession(request);
     } catch (error) {
       await runStore.update(record.id, {
         state: "failed",
-        errorText: redact(error.message),
+        errorText: redact((error as Error).message),
         finishedAt: new Date().toISOString(),
       });
       throw error;
@@ -131,10 +171,10 @@ export function createKomaBackend(config = {}, dependencies = {}) {
           .update(record.id, {
             state,
             finishedAt: new Date().toISOString(),
-            ...(cancelled ? {} : { errorText: redact(error.message) }),
+            ...(cancelled ? {} : { errorText: redact((error as Error).message) }),
           })
           .catch(() => {});
-        return { state, text: "", ...(cancelled ? {} : { error: redact(error.message) }) };
+        return { state, text: "", ...(cancelled ? {} : { error: redact((error as Error).message) }) };
       } finally {
         sessions.delete(record.id);
         await closeSession(session);
@@ -144,11 +184,15 @@ export function createKomaBackend(config = {}, dependencies = {}) {
     return { runId: record.id, state: "running" };
   }
 
-  async function wait(runId) {
+  async function wait(runId: string) {
     const session = sessions.get(runId);
     if (session) {
-      const result = await session.completion;
-      return { runId, ...result };
+      const result = (await session.completion) as {
+        state: string;
+        text: string;
+        error?: string;
+      };
+      return { runId, ...result } as any;
     }
     const record = await runStore.get(runId);
     if (!record) throw new Error(`No koma run found for ID ${runId}`);
@@ -160,12 +204,12 @@ export function createKomaBackend(config = {}, dependencies = {}) {
     };
   }
 
-  async function cancel(runId) {
+  async function cancel(runId: string) {
     const session = sessions.get(runId);
     if (!session) {
       const record = await runStore.get(runId);
       if (!record) throw new Error(`No koma run found for ID ${runId}`);
-      return { runId, state: record.state, cancelled: false };
+      return { runId, state: record.state as string, cancelled: false };
     }
 
     session.cancelled = true;
@@ -179,14 +223,14 @@ export function createKomaBackend(config = {}, dependencies = {}) {
     await closeSession(session);
     // Settle the completion before returning: koma runs have no status poll, so
     // the recorded state and the session tracker must reach a terminal value here.
-    await session.completion.catch(() => undefined);
+    await (session.completion as Promise<unknown>).catch(() => undefined);
     return { runId, state: "cancelled", cancelled: true };
   }
 
   return { start, wait, cancel, runForeground };
 }
 
-function assertHello(hello) {
+function assertHello(hello: any) {
   if (hello?.protocol !== PROTOCOL_VERSION) {
     throw new Error(
       `koma sdk speaks protocol ${hello?.protocol ?? "unknown"}; this backend needs ${PROTOCOL_VERSION}`,
@@ -201,7 +245,7 @@ function assertHello(hello) {
 
 // The reply is the newest assistant message carrying text; tool-use steps
 // commit empty or absent assistant messages before the final answer.
-function assistantText(state, label) {
+function assistantText(state: any, label: string): string {
   const turn = state?.turn;
   if (turn?.state === "failed") {
     throw new Error(`koma turn failed${turn.error ? `: ${turn.error}` : ""}`);
@@ -211,25 +255,37 @@ function assistantText(state, label) {
   const messages = Array.isArray(state?.messages) ? state.messages : [];
   const final = [...messages]
     .reverse()
-    .find((message) => message?.role === "assistant" && typeof message.content === "string" && message.content.trim());
-  const text = final?.content.trim() ?? (typeof state?.streaming === "string" ? state.streaming.trim() : "");
+    .find(
+      (message: any) =>
+        message?.role === "assistant" &&
+        typeof message.content === "string" &&
+        message.content.trim(),
+    );
+  const text =
+    final?.content.trim() ?? (typeof state?.streaming === "string" ? state.streaming.trim() : "");
   if (!text) throw new Error(`${label} returned no assistant text`);
   return text;
 }
 
-function connect(child, { timeoutMs }) {
+interface Waiter {
+  resolve: (value: any) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+function connect(child: ChildProcess, { timeoutMs }: { timeoutMs: number }): Connection {
   let buffer = "";
   let stderr = "";
   let closed = false;
-  let latest;
+  let latest: any;
   let sawRunningTurn = false;
   let nextId = 0;
-  let helloFrame;
-  const helloWaiters = [];
-  const turnWaiters = [];
-  const pending = new Map();
+  let helloFrame: any;
+  const helloWaiters: Waiter[] = [];
+  const turnWaiters: Waiter[] = [];
+  const pending = new Map<string, Waiter>();
 
-  function settle(target, outcome) {
+  function settle(target: "hello" | "turn", outcome: { error?: Error; value?: any }) {
     const waiters = target === "hello" ? helloWaiters.splice(0) : turnWaiters.splice(0);
     for (const waiter of waiters) {
       clearTimeout(waiter.timer);
@@ -237,7 +293,7 @@ function connect(child, { timeoutMs }) {
     }
   }
 
-  function failTransport(error) {
+  function failTransport(error: Error) {
     if (closed) return;
     for (const waiter of pending.values()) {
       clearTimeout(waiter.timer);
@@ -248,7 +304,7 @@ function connect(child, { timeoutMs }) {
     settle("turn", { error });
   }
 
-  function dispatch(frame) {
+  function dispatch(frame: any) {
     if (frame?.type === "hello") {
       helloFrame = frame;
       return settle("hello", { value: frame });
@@ -271,7 +327,7 @@ function connect(child, { timeoutMs }) {
 
   // The daemon can clear the turn once the work is done; a turn that ran and
   // then vanished with a settled session is finished, not in flight.
-  function isTerminalState(state) {
+  function isTerminalState(state: any): boolean {
     if (!state) return false;
     if (state.turn && TERMINAL_TURN_STATES.has(state.turn.state)) return true;
     return !state.turn && sawRunningTurn && state.working === false;
@@ -279,10 +335,10 @@ function connect(child, { timeoutMs }) {
 
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
-  child.stderr?.on("data", (chunk) => {
+  child.stderr?.on("data", (chunk: string) => {
     stderr = appendCapped(stderr, chunk, MAX_STDERR_BYTES);
   });
-  child.stdout?.on("data", (chunk) => {
+  child.stdout?.on("data", (chunk: string) => {
     buffer += chunk;
     let index;
     while ((index = buffer.indexOf("\n")) >= 0) {
@@ -298,8 +354,10 @@ function connect(child, { timeoutMs }) {
       dispatch(frame);
     }
   });
-  child.once("error", (error) => failTransport(error));
-  child.once("close", (code, signal) =>
+  child.once("error", (error: NodeJS.ErrnoException) =>
+    failTransport(new Error(String(error.message))),
+  );
+  child.once("close", (code: number | null, signal: string | null) =>
     failTransport(
       new Error(
         `koma sdk exited (${code ?? signal ?? "unknown"})${stderr ? `: ${tail(stderr)}` : ""}`,
@@ -307,7 +365,7 @@ function connect(child, { timeoutMs }) {
     ),
   );
 
-  function write(payload) {
+  function write(payload: unknown): boolean {
     if (closed || !child.stdin?.writable) return false;
     try {
       child.stdin.write(`${JSON.stringify(payload)}\n`);
@@ -332,7 +390,7 @@ function connect(child, { timeoutMs }) {
       });
     },
 
-    request(method, params) {
+    request(method: string, params: unknown) {
       if (closed) return Promise.reject(new Error("koma sdk connection is closed"));
       const id = `m${++nextId}`;
       return new Promise((resolve, reject) => {
@@ -392,13 +450,13 @@ function connect(child, { timeoutMs }) {
   };
 }
 
-function describeProtocolError(error) {
+function describeProtocolError(error: any) {
   const code = error?.code ? `${error.code}: ` : "";
   const delivery = error?.delivery ? ` (delivery: ${error.delivery})` : "";
   return `${code}${error?.message ?? "unknown error"}${delivery}`;
 }
 
-function appendCapped(current, chunk, limit) {
+function appendCapped(current: string, chunk: unknown, limit: number): string {
   const remaining = limit - Buffer.byteLength(current, "utf8");
   if (remaining <= 0) return current;
   const bytes = Buffer.from(String(chunk), "utf8");
@@ -406,14 +464,14 @@ function appendCapped(current, chunk, limit) {
   return `${current}${bytes.subarray(0, remaining).toString("utf8")}\n[stderr truncated]`;
 }
 
-function tail(text) {
+function tail(text: string): string {
   const lines = text.trim().split("\n");
   return lines.slice(-3).join(" | ");
 }
 
-function redact(text) {
+function redact(text: unknown): string {
   return SECRET_PATTERNS.reduce(
-    (value, [pattern, replacement]) => value.replace(pattern, replacement),
+    (value: string, [pattern, replacement]) => value.replace(pattern, replacement),
     String(text ?? ""),
   );
 }

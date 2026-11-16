@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { invoke, makeHarness } from "./support/extension-harness.js";
+import { invoke, makeHarness } from "./support/extension-harness.ts";
 
 const providerFailure = (id) =>
   `OpenCode session ${id} failed: provider.quota (402) Upstream request failed: Endpoint is unavailable.`;

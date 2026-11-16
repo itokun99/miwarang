@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { makeHarness } from "./support/extension-harness.js";
+import { makeHarness } from "./support/extension-harness.ts";
 
 const policyBackends = { opencode: { type: "opencode-v2", command: "opencode" } };
 

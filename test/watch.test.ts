@@ -6,7 +6,7 @@ import {
   formatStatusLine,
   isTerminalState,
   shortId,
-} from "../src/watch.js";
+} from "../src/watch.ts";
 
 const RUN_ID = "run_11111111-1111-1111-1111-111111111111";
 const SES_ID = "ses_22222222-2222-2222-2222-222222222222";

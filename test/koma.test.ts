@@ -3,8 +3,8 @@ import { EventEmitter } from "node:events";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createKomaBackend } from "../src/backends/koma.js";
-import { RunStore } from "../src/runs/store.js";
+import { createKomaBackend } from "../src/backends/koma.ts";
+import { RunStore } from "../src/runs/store.ts";
 
 const HELLO = {
   type: "hello",
