@@ -112,13 +112,13 @@ describe("defaultModels inheritance", () => {
     ).not.toThrow();
   });
 
-  test("validateConfig requires models for Command Code routes without defaultModels", () => {
+  test("validateConfig accepts Command Code routes without defaultModels (backend owns its model)", () => {
     expect(() =>
       validateConfig({
         backends,
         routes: { "category:writing": { backend: "commandcode" } },
       }),
-    ).toThrow(/category:writing must define a models string array.*defaultModels/);
+    ).not.toThrow();
   });
 
   test("validateConfig accepts an OpenCode route without a model list", () => {

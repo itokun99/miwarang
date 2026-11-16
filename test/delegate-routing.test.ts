@@ -66,12 +66,12 @@ describe("delegate routing", () => {
     expect(calls).toEqual([]);
   });
 
-  test("CommandCode selects the first available configured model without a freeOnly filter", async () => {
+  test("CommandCode sends task intent to the backend without a Miwarang-selected model", async () => {
     const calls = [];
     const commandcode = {
-      listModels: async () => [
-        { providerID: "moonshotai", id: "kimi-k3", cost: { input: 5, output: 15 } },
-      ],
+      listModels: async () => {
+        throw new Error("command model list must not be queried");
+      },
       runForeground: async (request) => {
         calls.push(request);
         return { sessionId: "ses_command", text: "Command result" };
@@ -83,11 +83,7 @@ describe("delegate routing", () => {
     const commandConfig = {
       backends: { commandcode: { type: "command", command: "commandcode" } },
       routes: {
-        "category:writing": {
-          backend: "commandcode",
-          models: ["qwen/qwen3.8-max", "moonshotai/kimi-k3"],
-          freeOnly: true,
-        },
+        "category:writing": { backend: "commandcode" },
       },
     };
     const { tools } = makeHarness({ config: commandConfig, backends: { commandcode } });
@@ -97,19 +93,20 @@ describe("delegate routing", () => {
       prompt: "Write the docs",
     });
 
-    expect(calls[0].model).toBe("moonshotai/kimi-k3");
-    expect(result.details.model).toBe("moonshotai/kimi-k3");
+    expect(calls).toEqual([
+      { cwd: "/workspace", target: "category:writing", prompt: "Write the docs" },
+    ]);
+    expect(result.details).not.toHaveProperty("model");
+    expect(result.details).toMatchObject({ backend: "commandcode", resolvedVia: "exact" });
   });
 
-  test("a command backend without a catalog uses its configured model candidates", async () => {
+  test("a command backend model comes from its own config, not Miwarang selection", async () => {
     const commandConfig = {
-      backends: { commandcode: { type: "command", command: "commandcode" } },
+      backends: {
+        commandcode: { type: "command", command: "commandcode", model: "qwen/qwen3.8-max" },
+      },
       routes: {
-        "category:writing": {
-          backend: "commandcode",
-          models: ["qwen/qwen3.8-max"],
-          freeOnly: true,
-        },
+        "category:writing": { backend: "commandcode" },
       },
     };
     const { tools, calls } = makeHarness({ config: commandConfig });
@@ -119,8 +116,12 @@ describe("delegate routing", () => {
       prompt: "Write the docs",
     });
 
-    expect(calls[0][1].model).toBe("qwen/qwen3.8-max");
-    expect(result.details.model).toBe("qwen/qwen3.8-max");
+    expect(calls[0][1]).toEqual({
+      cwd: "/workspace",
+      target: "category:writing",
+      prompt: "Write the docs",
+    });
+    expect(result.details).not.toHaveProperty("model");
   });
 
   test("a wildcard OpenCode target reports route provenance without a model", async () => {
@@ -144,7 +145,7 @@ describe("delegate routing", () => {
     expect(result.details).not.toHaveProperty("model");
   });
 
-  test("a backend override uses the matching CommandCode fallback candidates", async () => {
+  test("a backend override keeps the backend-configured model, not a route model", async () => {
     const { tools, calls } = makeHarness({ config: wildcardOverrideConfig });
 
     const result = await invoke(tools.get("miwarang_delegate"), {
@@ -153,15 +154,16 @@ describe("delegate routing", () => {
       backend: "commandcode",
     });
 
-    expect(calls[0][1]).toMatchObject({
+    expect(calls[0][1]).toEqual({
+      cwd: "/workspace",
       target: "category:writing",
-      model: "qwen/qwen3.8-max",
+      prompt: "Write the docs",
     });
     expect(result.details).toMatchObject({
       backend: "commandcode",
       resolvedVia: "wildcard",
-      model: "qwen/qwen3.8-max",
     });
+    expect(result.details).not.toHaveProperty("model");
   });
 
   test("OpenCode ignores an OMO route agent name and keeps the configured orchestrator", async () => {

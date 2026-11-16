@@ -6,3 +6,4 @@ coverage/
 !.env.example
 docs/superpowers/plans/
 .omo/
+.commandcode/

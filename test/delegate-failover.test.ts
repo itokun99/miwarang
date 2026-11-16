@@ -4,11 +4,10 @@ import { invoke, makeHarness } from "./support/extension-harness.ts";
 const providerFailure = (id) =>
   `OpenCode session ${id} failed: provider.quota (402) Upstream request failed: Endpoint is unavailable.`;
 
-function commandBackend(catalog, behavior = {}) {
+function commandBackend(behavior = {}) {
   const calls = [];
   return {
     calls,
-    listModels: async () => catalog,
     runForeground: async (request) => {
       calls.push(request);
       if (behavior.runForeground) return behavior.runForeground(request, calls);
@@ -25,7 +24,7 @@ function commandBackend(catalog, behavior = {}) {
 }
 
 describe("delegate backend failover", () => {
-  test("an OpenCode provider error falls back without trying Miwarang model candidates", async () => {
+  test("an OpenCode provider error falls back to the configured backend fallback", async () => {
     const config = {
       backends: {
         opencode: { type: "opencode-v2", command: "opencode" },
@@ -34,8 +33,7 @@ describe("delegate backend failover", () => {
       routes: {
         "category:quick": {
           backend: "opencode",
-          models: ["opencode/model-a", "opencode/model-b"],
-          fallbacks: [{ backend: "commandcode", models: ["qwen/qwen3.8-flash"] }],
+          fallbacks: [{ backend: "commandcode" }],
         },
       },
     };
@@ -54,7 +52,7 @@ describe("delegate backend failover", () => {
       wait: async () => ({}),
       cancel: async () => ({}),
     };
-    const commandcode = commandBackend(undefined);
+    const commandcode = commandBackend();
     const { tools } = makeHarness({
       config,
       backends: { opencode, commandcode },
@@ -68,11 +66,14 @@ describe("delegate backend failover", () => {
     expect(opencodeCalls).toEqual([
       { cwd: "/workspace", target: "category:quick", prompt: "Inspect this project" },
     ]);
-    expect(commandcode.calls[0].model).toBe("qwen/qwen3.8-flash");
+    expect(commandcode.calls[0]).toEqual({
+      cwd: "/workspace",
+      target: "category:quick",
+      prompt: "Inspect this project",
+    });
     expect(result.content[0].text).toBe("Command fallback result");
     expect(result.details).toMatchObject({
       backend: "commandcode",
-      model: "qwen/qwen3.8-flash",
       fallback: true,
       fallbackIndex: 1,
     });
@@ -82,7 +83,7 @@ describe("delegate backend failover", () => {
     const config = {
       backends: { opencode: { type: "opencode-v2", command: "opencode" } },
       routes: {
-        "category:quick": { backend: "opencode", models: ["opencode/model-a", "opencode/model-b"] },
+        "category:quick": { backend: "opencode" },
       },
     };
     const calls = [];
@@ -120,7 +121,7 @@ describe("delegate backend failover", () => {
       routes: {
         "category:quick": {
           backend: "opencode",
-          fallbacks: [{ backend: "commandcode", models: ["qwen/qwen3.8-flash"] }],
+          fallbacks: [{ backend: "commandcode" }],
         },
       },
     };
@@ -139,7 +140,7 @@ describe("delegate backend failover", () => {
           wait: async () => ({}),
           cancel: async () => ({}),
         },
-        commandcode: commandBackend(undefined, {
+        commandcode: commandBackend({
           runForeground: async () => {
             commandCalls += 1;
             return { sessionId: "ses_command", text: "Should not run" };
@@ -166,11 +167,11 @@ describe("delegate backend failover", () => {
       routes: {
         "category:deep-high": {
           backend: "opencode",
-          fallbacks: [{ backend: "commandcode", models: ["reflection/beam:free"] }],
+          fallbacks: [{ backend: "commandcode" }],
         },
       },
     };
-    const commandcode = commandBackend(undefined);
+    const commandcode = commandBackend();
     const { tools } = makeHarness({
       config,
       backends: {
@@ -202,54 +203,62 @@ describe("delegate backend failover", () => {
       mode: "background",
     });
 
-    expect(commandcode.calls[0].model).toBe("reflection/beam:free");
+    expect(commandcode.calls[0]).toEqual({
+      cwd: "/workspace",
+      target: "category:deep-high",
+      prompt: "Inspect this project",
+    });
     expect(result.details).toMatchObject({
       backend: "commandcode",
-      model: "reflection/beam:free",
       fallback: true,
       fallbackIndex: 1,
     });
   });
 
-  test("CommandCode quota errors advance through ordered candidates", async () => {
+  test("command quota errors advance to the configured backend fallback", async () => {
     const config = {
-      backends: { commandcode: { type: "command", command: "commandcode" } },
+      backends: {
+        commandcode: { type: "command", command: "commandcode" },
+        koma: { type: "koma-sdk", command: "koma" },
+      },
       routes: {
         "category:writing": {
           backend: "commandcode",
-          models: ["reflection/beam:free", "deepseek/deepseek-v4-flash"],
-          freeOnly: true,
+          fallbacks: [{ backend: "koma" }],
         },
       },
     };
-    const commandcode = commandBackend([
-      { providerID: "reflection", id: "beam:free", cost: { input: 0, output: 0 } },
-      { providerID: "deepseek", id: "deepseek-v4-flash", cost: { input: 1, output: 1 } },
-    ], {
-      runForeground: async (request, calls) => {
-        if (calls.length === 1) {
-          throw new Error(
-            "Configured command failed with exit code 1: You've reached your 5-hour usage limit",
-          );
-        }
-        return { sessionId: "ses_command", text: "Cheap model result" };
+    const commandcode = commandBackend({
+      runForeground: async () => {
+        throw new Error(
+          "Configured command failed with exit code 1: You've reached your 5-hour usage limit",
+        );
       },
     });
-    const { tools } = makeHarness({ config, backends: { commandcode } });
+    const komaCalls = [];
+    const koma = {
+      runForeground: async (request) => {
+        komaCalls.push(request);
+        return { sessionId: "ses_koma", text: "Koma fallback result" };
+      },
+      start: async () => ({ runId: "run_koma", state: "running" }),
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const { tools } = makeHarness({ config, backends: { commandcode, koma } });
 
     const result = await invoke(tools.get("miwarang_delegate"), {
       target: "category:writing",
       prompt: "Inspect this project",
     });
 
-    expect(commandcode.calls.map((request) => request.model)).toEqual([
-      "reflection/beam:free",
-      "deepseek/deepseek-v4-flash",
+    expect(komaCalls).toEqual([
+      { cwd: "/workspace", target: "category:writing", prompt: "Inspect this project" },
     ]);
-    expect(result.content[0].text).toBe("Cheap model result");
+    expect(result.content[0].text).toBe("Koma fallback result");
     expect(result.details).toMatchObject({
-      backend: "commandcode",
-      model: "deepseek/deepseek-v4-flash",
+      backend: "koma",
+      fallback: true,
     });
   });
 });

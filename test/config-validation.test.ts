@@ -31,11 +31,20 @@ describe("validateConfig", () => {
     ).not.toThrow();
   });
 
-  test("requires models for a command route without defaultModels", () => {
+  test("accepts a command route without models (backend owns its model)", () => {
     expect(() =>
       validateConfig({
         backends: commandBackend,
         routes: { "category:writing": { backend: "commandcode" } },
+      }),
+    ).not.toThrow();
+  });
+
+  test("rejects a malformed models list on a command route", () => {
+    expect(() =>
+      validateConfig({
+        backends: commandBackend,
+        routes: { "category:writing": { backend: "commandcode", models: ["m", 3] } },
       }),
     ).toThrow(/category:writing must define a models string array/);
   });
@@ -49,14 +58,14 @@ describe("validateConfig", () => {
     ).not.toThrow();
   });
 
-  test("requires a model list for a command defaultRoute", () => {
+  test("accepts a defaultRoute without models (backend owns its model)", () => {
     expect(() =>
       validateConfig({
         backends: commandBackend,
-        routes: { "category:writing": { backend: "commandcode", models: ["m"] } },
+        routes: { "category:writing": { backend: "commandcode" } },
         defaultRoute: { backend: "commandcode" },
       }),
-    ).toThrow(/defaultRoute must define a models string array/);
+    ).not.toThrow();
   });
 
   test("accepts blockNativeTask as boolean, string array, and per-route", () => {
@@ -185,13 +194,13 @@ describe("defaultModels inheritance", () => {
     ).not.toThrow();
   });
 
-  test("validateConfig rejects command routes without models or defaultModels", () => {
+  test("validateConfig accepts command routes without models or defaultModels (backend owns its model)", () => {
     expect(() =>
       validateConfig({
         backends: commandBackend,
         routes: { "category:writing": { backend: "commandcode" } },
       }),
-    ).toThrow(/category:writing must define a models string array.*defaultModels/);
+    ).not.toThrow();
   });
 
   test("validateConfig rejects a malformed defaultModels", () => {

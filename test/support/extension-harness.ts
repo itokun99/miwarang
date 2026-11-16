@@ -5,17 +5,8 @@ export const config = {
     opencode: { type: "opencode-v2", command: "opencode" },
   },
   routes: {
-    "category:quick": {
-      backend: "opencode",
-      models: ["opencode/space-bunny-free"],
-      freeOnly: true,
-    },
-    "agent:explore": {
-      backend: "opencode",
-      models: ["opencode-go/longcat-2.5-preview-free"],
-      freeOnly: true,
-      agent: "explore",
-    },
+    "category:quick": { backend: "opencode" },
+    "agent:explore": { backend: "opencode", agent: "explore" },
   },
 };
 

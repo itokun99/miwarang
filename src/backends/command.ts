@@ -15,6 +15,8 @@ export interface CommandConfig {
   timeoutMs?: number;
   id?: string;
   listModelsArgv?: string[];
+  model?: string;
+  agent?: string;
   [key: string]: unknown;
 }
 
@@ -57,8 +59,8 @@ export function buildCommandInvocation(config: CommandConfig, request: CommandRe
   }
 
   const values: Record<string, unknown> = {
-    model: request.model,
-    agent: request.agent,
+    model: request.model ?? config.model,
+    agent: request.agent ?? config.agent,
     cwd: request.cwd,
     target: request.target,
   };

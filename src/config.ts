@@ -165,22 +165,14 @@ function validateRouteShape(
   config: MiwarangConfig,
   allowFallbacks = true,
 ): void {
+  void config;
   if (!route || typeof route.backend !== "string") {
     throw new Error(`Route ${name} must name a backend`);
   }
-  const hasDefaultModels = Array.isArray(config.defaultModels);
-  const needsModels = config.backends?.[route.backend]?.type !== "opencode-v2";
-  if (route.models === undefined) {
-    if (needsModels && !hasDefaultModels) {
-      throw new Error(
-        `Route ${name} must define a models string array (or set top-level defaultModels)`,
-      );
+  if (route.models !== undefined) {
+    if (!Array.isArray(route.models) || route.models.some((model) => typeof model !== "string")) {
+      throw new Error(`Route ${name} must define a models string array`);
     }
-  } else if (
-    !Array.isArray(route.models) ||
-    route.models.some((model) => typeof model !== "string")
-  ) {
-    throw new Error(`Route ${name} must define a models string array`);
   }
   if (route.blockNativeTask !== undefined) {
     validateBlockNativeTask(route.blockNativeTask, `Route ${name}`);

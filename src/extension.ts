@@ -196,7 +196,7 @@ export function setupExtension(
         tracker.track({
           id: id as string,
           backend: selected.backendId,
-          backendType: selected.candidate.backend.type,
+          backendType: selected.backend.type,
           target,
           startedAt: Date.now(),
         } as TrackedRun);
@@ -209,7 +209,7 @@ export function setupExtension(
             backend: selected.backendId,
             resolvedVia: resolvedViaValue,
             target,
-            ...(selected.route.model === undefined ? {} : { model: selected.route.model }),
+            ...(selected.model === undefined ? {} : { model: selected.model }),
             ...(selected.index > 0
               ? { fallback: true, fallbackIndex: selected.index }
               : {}),
@@ -223,7 +223,7 @@ export function setupExtension(
           backend: selected.backendId,
           resolvedVia: resolvedViaValue,
           target,
-          ...(selected.route.model === undefined ? {} : { model: selected.route.model }),
+          ...(selected.model === undefined ? {} : { model: selected.model }),
           ...(selected.index > 0 ? { fallback: true, fallbackIndex: selected.index } : {}),
         },
       };
