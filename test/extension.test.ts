@@ -59,6 +59,50 @@ describe("Senpi extension registration", () => {
     });
   });
 
+  test("background runs carry the OMO thread identity for main-orchestrator validation", async () => {
+    const { tools, calls } = makeHarness();
+    const ctx = { cwd: "/workspace", sessionId: "thread_abc123" };
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      target: "agent:explore",
+      prompt: "List relevant files",
+      mode: "background",
+    }, ctx);
+
+    expect(result.details).toMatchObject({
+      sessionId: "ses_background",
+      omoThreadId: "thread_abc123",
+      backend: "opencode",
+    });
+    expect(calls[0]).toEqual([
+      "start",
+      { cwd: "/workspace", target: "agent:explore", prompt: "List relevant files" },
+    ]);
+  });
+
+  test("wait and cancel return the stable OMO thread and run identifiers", async () => {
+    const { tools } = makeHarness();
+    const ctx = { cwd: "/workspace", sessionId: "thread_abc123" };
+
+    const waited = await invoke(tools.get("miwarang_wait"), {
+      sessionId: "ses_background",
+    }, ctx);
+    const cancelled = await invoke(tools.get("miwarang_cancel"), {
+      sessionId: "ses_background",
+    }, ctx);
+
+    expect(waited.details).toMatchObject({
+      sessionId: "ses_background",
+      omoThreadId: "thread_abc123",
+      text: "Background result",
+    });
+    expect(cancelled.details).toMatchObject({
+      sessionId: "ses_background",
+      omoThreadId: "thread_abc123",
+      interrupted: true,
+    });
+  });
+
   test("redirects routed native tasks and leaves unrelated tasks alone", async () => {
     const { handlers } = makeHarness();
     const handler = handlers.get("tool_call")[0];

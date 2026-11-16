@@ -27,6 +27,7 @@ interface RunToolsOptions {
 
 interface PiContext {
   ui?: { notify?: (message: string, level?: string) => void };
+  sessionId?: string;
   [key: string]: unknown;
 }
 
@@ -62,7 +63,7 @@ export function registerRunTools(pi: PiHost, { config, backends, store, tracker,
       syncStatus(ctx);
       return {
         content: [{ type: "text", text: result.text || `Task state: ${result.state}.` }],
-        details: { ...result, backend: backendId },
+        details: { ...result, backend: backendId, omoThreadId: ctx?.sessionId },
       };
     },
   });
@@ -91,7 +92,7 @@ export function registerRunTools(pi: PiHost, { config, backends, store, tracker,
       syncStatus(ctx);
       return {
         content: [{ type: "text", text: `Cancellation state: ${result.state ?? result.interrupted}.` }],
-        details: { ...result, backend: backendId },
+        details: { ...result, backend: backendId, omoThreadId: ctx?.sessionId },
       };
     },
   });

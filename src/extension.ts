@@ -193,12 +193,14 @@ export function setupExtension(
 
       if (mode === "background") {
         const id = result.sessionId ?? result.runId;
+        const omoThreadId = ctx?.sessionId;
         tracker.track({
           id: id as string,
           backend: selected.backendId,
           backendType: selected.backend.type,
           target,
           startedAt: Date.now(),
+          ...(omoThreadId !== undefined ? { omoThreadId } : {}),
         } as TrackedRun);
         syncStatus(ctx);
         const text = `Started ${target} in background (${id}).`;
@@ -209,6 +211,7 @@ export function setupExtension(
             backend: selected.backendId,
             resolvedVia: resolvedViaValue,
             target,
+            ...(omoThreadId !== undefined ? { omoThreadId } : {}),
             ...(selected.model === undefined ? {} : { model: selected.model }),
             ...(selected.index > 0
               ? { fallback: true, fallbackIndex: selected.index }
