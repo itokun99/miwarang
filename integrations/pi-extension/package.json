@@ -1,0 +1,9 @@
+{
+  "name": "miwarang-pi-extension",
+  "version": "0.9.3",
+  "type": "module",
+  "description": "Miwarang delegation tool for Pi: one tool for delegate, wait, and cancel across configured harnesses.",
+  "pi": {
+    "extensions": ["./miwarang.ts"]
+  }
+}

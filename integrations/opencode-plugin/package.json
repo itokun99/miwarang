@@ -1,0 +1,15 @@
+{
+  "name": "miwarang-opencode-plugin",
+  "version": "0.9.3",
+  "type": "module",
+  "description": "Miwarang delegation tools for OpenCode V2: delegate, wait, and cancel across configured harnesses.",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@opencode/plugin": "latest"
+  },
+  "files": [
+    "dist"
+  ]
+}
