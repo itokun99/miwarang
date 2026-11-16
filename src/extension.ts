@@ -4,19 +4,17 @@ import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import { createCommandBackend } from "./backends/command.ts";
 import { createKomaBackend } from "./backends/koma.ts";
-import { executeDelegate } from "./delegate-routing.ts";
 import { RunStore } from "./runs/store.ts";
 import { registerRunTools } from "./run-tools.ts";
-import { buildEnvelope } from "./envelope.ts";
+import { createMiwarangService } from "./service.ts";
 import {
   createRunTracker,
   formatStatusLine,
   isTerminalState,
 } from "./watch.ts";
 import type { MiwarangConfig, BackendConfig } from "./config.ts";
-import type { BackendAdapter, DelegateRequest } from "./delegate-routing.ts";
+import type { BackendAdapter } from "./delegate-routing.ts";
 import type { RunTracker, TrackedRun } from "./watch.ts";
-import type { StreamSink } from "./stream.ts";
 
 const STATUS_POLL_MS = 15_000;
 
@@ -96,6 +94,14 @@ export function setupExtension(
     }
   }
 
+  const service = createMiwarangService({
+    config,
+    backends,
+    tracker,
+    store,
+    onRunTracked: () => syncStatus(statusCtx),
+  });
+
   pi.registerTool({
     name: "miwarang_delegate",
     label: "Delegate task",
@@ -149,49 +155,20 @@ export function setupExtension(
       onUpdate: unknown,
       ctx?: PiContext,
     ) {
-      const sink: StreamSink | undefined =
-        typeof onUpdate === "function" ? (onUpdate as StreamSink) : undefined;
-      const execution = await executeDelegate(config, backends, {
-        prompt: params.prompt,
-        mode: params.mode ?? "foreground",
-        backend: params.backend,
-        cwd: params.cwd ?? ctx?.cwd ?? pi.cwd ?? process.cwd(),
-        onUpdate: sink,
-      } as DelegateRequest);
-      const { result, selected, mode, resolvedVia } = execution;
-      const envelope = buildEnvelope({
-        result,
-        backend: selected.backendId,
-        agent: selected.agent,
-        fallbackIndex: selected.index,
-        resolvedVia,
-        mode,
-      });
-
-      if (mode === "background") {
-        const id = result.sessionId ?? result.runId;
-        const omoThreadId = ctx?.sessionId;
-        tracker.track({
-          id: id as string,
-          backend: selected.backendId,
-          backendType: selected.backend.type,
-          startedAt: Date.now(),
-          ...(omoThreadId !== undefined ? { omoThreadId } : {}),
-        } as TrackedRun);
-        syncStatus(ctx);
-        const text = `Started background delegation (${id}).`;
-        return {
-          content: [{ type: "text", text }],
-          details: {
-            ...envelope,
-            ...(omoThreadId !== undefined ? { omoThreadId } : {}),
-          },
-        };
-      }
-      return {
-        content: [{ type: "text", text: result.text ?? "" }],
-        details: envelope,
-      };
+      syncStatus(ctx);
+      const { text, details } = await service.delegate(
+        {
+          prompt: params.prompt,
+          mode: params.mode,
+          backend: params.backend,
+          onUpdate:
+            typeof onUpdate === "function"
+              ? (onUpdate as (delta: string) => void)
+              : undefined,
+        },
+        { cwd: params.cwd ?? ctx?.cwd ?? pi.cwd ?? process.cwd(), sessionId: typeof ctx?.sessionId === "string" ? ctx.sessionId : undefined },
+      );
+      return { content: [{ type: "text", text }], details };
     },
   });
   registerRunTools(pi as any, { config, backends: backends as Record<string, BackendAdapter>, store, tracker, syncStatus });
