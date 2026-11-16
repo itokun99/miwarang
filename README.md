@@ -1,26 +1,67 @@
 # Miwarang Delegate
 
-Miwarang registers Senpi tools that delegate work by prompt to configured second-orchestrator harnesses. It is a unified delegation tool: any agent platform (OMO, OpenCode plugins, Command Code mods, Claude Code mods, …) can call `miwarang_delegate` with a prompt, and the configured backend harnesses own their models and agents. Miwarang never selects a model and never runs an agent itself.
+Miwarang is a unified, prompt-driven delegation tool. It hands a complete task prompt to configured second-orchestrator harnesses — OpenCode CLI, Command Code, Koma, or any command-line agent — while every harness keeps owning its model and agent. Miwarang never selects a model and never runs an agent itself.
+
+It ships in three shapes backed by one core: a Senpi/OMO extension, an OpenCode V2 plugin, Pi/OMP extensions, and a stdio MCP server that any MCP-speaking host (Claude Code, Cursor, OpenCode, …) can call.
+
+## Install
+
+One npm package, one command — the installer asks which host you use and wires the right artifact:
+
+```sh
+npx miwarang init
+```
+
+| You use | Installer does |
+|---|---|
+| OMO / Senpi | copies the extension into `~/.omo/agent/extensions/miwarang/` and seeds `~/.config/miwarang/config.json` from the example when none exists |
+| Pi | copies the extension into `~/.pi/agent/extensions/miwarang.js` |
+| OpenCode | copies the plugin into `.opencode/plugins/miwarang/` (or `~/.config/opencode/plugins/` with `--global`) |
+| Claude Code | registers the MCP server in the project `.mcp.json` and `~/.claude/claude.json` |
+| Other MCP host | prints a ready-to-paste `mcpServers` snippet |
+
+Non-interactive equivalents:
+
+```sh
+npx miwarang init --target senpi
+npx miwarang init --target pi
+npx miwarang init --target opencode --global
+npx miwarang init --target claude-code
+npx miwarang init --target mcp
+npx miwarang uninstall --target senpi
+```
+
+Set `MIWARANG_CONFIG` to use a different config file; without it the extension and MCP server read `~/.config/miwarang/config.json`.
+
+## Requirements
+
+- Bun 1.4 or later
+- At least one configured harness: OpenCode CLI, Command Code, Koma, or any command-line agent
+- For the Senpi/OMO extension: Senpi 5.1.30 or later
+
+## Install from source
+
+Clone the repository and run the installer from the checkout:
+
+```sh
+git clone https://github.com/itokun99/miwarang.git
+cd miwarang
+bun install
+bun src/installer.ts init
+```
+
+The extension is written in TypeScript and executed directly by Bun; a thin `src/extension.js` shim keeps the installed wrapper working without changes. Restart Senpi or run `/reload` to load the extension. Once the global wrapper exists, start Senpi normally; do not also pass `-e` for the same extension or Senpi will register its tools twice. Before installing the wrapper, a one-off test can use:
+
+```sh
+senpi -e ~/Projects/miwarang/src/extension.ts
+```
 
 ## MCP server
 
-Miwarang also runs as a stdio MCP server, so any MCP-speaking host (Claude Code, Cursor, OpenCode, …) can reach the same delegation chain without the Senpi extension:
+Run the server directly for any MCP host:
 
 ```sh
 MIWARANG_CONFIG=~/.config/miwarang/config.json bun src/mcp-server.ts
-```
-
-Claude Code example:
-
-```json
-{
-  "mcpServers": {
-    "miwarang": {
-      "command": "bun",
-      "args": ["/path/to/miwarang/src/mcp-server.ts"]
-    }
-  }
-}
 ```
 
 The server exposes `miwarang_delegate`, `miwarang_wait`, and `miwarang_cancel`; every result carries the versioned envelope documented in `skills/miwarang/SKILL.md`.
@@ -28,42 +69,6 @@ The server exposes `miwarang_delegate`, `miwarang_wait`, and `miwarang_cancel`; 
 ## Delegation skill
 
 `skills/miwarang/SKILL.md` is the companion skill: when to delegate, the tool contract, the response envelope, and host wiring recipes.
-
-## Requirements
-
-- Bun 1.4 or later
-- Senpi 5.1.30 or later
-- At least one configured harness: OpenCode CLI, Command Code, Koma, or any command-line agent
-
-## Install
-
-Clone the project, install its dependency, and create the user config without replacing an existing config:
-
-```sh
-git clone https://github.com/itokun99/miwarang.git
-cd miwarang
-bun install
-mkdir -p ~/.config/miwarang ~/.omo/agent/extensions
-if [ ! -e ~/.config/miwarang/config.json ]; then
-  cp config.example.json ~/.config/miwarang/config.json
-fi
-wrapper="$HOME/.omo/agent/extensions/miwarang.js"
-source_url="file://$(pwd -P)/src/extension.js"
-if [ ! -e "$wrapper" ]; then
-  printf 'export { default } from "%s";\n' "$source_url" > "$wrapper"
-fi
-```
-
-The extension is written in TypeScript and executed directly by Bun; a thin
-`src/extension.js` shim keeps the installed wrapper working without changes.
-
-Restart Senpi or run `/reload` to load the extension. Once the global wrapper exists, start Senpi normally; do not also pass `-e` for the same extension or Senpi will register its tools twice. Before installing the wrapper, a one-off test can use:
-
-```sh
-senpi -e ~/Projects/miwarang/src/extension.ts
-```
-
-Set `MIWARANG_CONFIG` to use a different config file. Without it, the extension reads `~/.config/miwarang/config.json`.
 
 ## How delegation works
 
@@ -171,7 +176,8 @@ Miwarang Delegate is distributed under the MIT License. See [LICENSE](LICENSE).
 ```sh
 bun test
 bunx tsc --noEmit
+bun src/installer.ts init --target senpi   # or another target
 senpi -e ./src/extension.ts --list-models
 ```
 
-The test suite covers the delegation chain, failover, per-backend agent passthrough, config validation and migration errors, the command and koma adapters, run tracking, and the wait/cancel lifecycle.
+The test suite covers the delegation chain, failover, per-backend agent passthrough, config validation and migration errors, the command and koma adapters, run tracking, the wait/cancel lifecycle, the MCP server, the host integrations, and the installer.
