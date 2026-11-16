@@ -83,7 +83,7 @@ export function formatRunTable(runs: TrackedRun[], now = Date.now()): string {
   if (!runs.length) return "miwarang: no background runs tracked in this session.";
   const lines = runs.map(
     (run) =>
-      `${run.id}  ${run.state}  ${formatElapsed(now - run.startedAt)}  ${run.target} (${run.backend})`,
+      `${run.id}  ${run.state}  ${formatElapsed(now - run.startedAt)}  (${run.backend})`,
   );
   return ["miwarang background runs:", ...lines.map((line) => `- ${line}`)].join("\n");
 }

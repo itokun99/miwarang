@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { invoke, makeHarness, uiRecorder, wildcardOverrideConfig } from "./support/extension-harness.ts";
+import { invoke, makeHarness, uiRecorder, commandOnlyConfig } from "./support/extension-harness.ts";
 
 describe("progress surfaces", () => {
   test("the status line shows a run on start and clears after wait", async () => {
@@ -9,7 +9,7 @@ describe("progress surfaces", () => {
 
     await invoke(
       tools.get("miwarang_delegate"),
-      { target: "agent:explore", prompt: "List files", mode: "background" },
+      { prompt: "List files", mode: "background" },
       ctx,
     );
     expect(statuses.at(-1)[0]).toBe("miwarang");
@@ -21,17 +21,14 @@ describe("progress surfaces", () => {
   });
 
   test("tracks and waits for five background runs without a DAG child", async () => {
-    const sessions = [];
+    const sessions: string[] = [];
     const opencode = {
-      listModels: async () => {
-        throw new Error("OpenCode model catalogs are not part of delegation");
-      },
       start: async () => {
         const sessionId = `ses_multi_${sessions.length + 1}`;
         sessions.push(sessionId);
         return { sessionId, state: "running" };
       },
-      wait: async (sessionId) => ({
+      wait: async (sessionId: string) => ({
         sessionId,
         state: "completed",
         text: `completed ${sessionId}`,
@@ -47,7 +44,6 @@ describe("progress surfaces", () => {
         invoke(
           tools.get("miwarang_delegate"),
           {
-            target: "category:quick",
             prompt: `Background task ${index + 1}`,
             mode: "background",
           },
@@ -55,7 +51,7 @@ describe("progress surfaces", () => {
         ),
       ),
     );
-    const ids = started.map((result) => result.details.sessionId);
+    const ids = started.map((result: any) => result.details.sessionId);
     expect(ids).toEqual([
       "ses_multi_1",
       "ses_multi_2",
@@ -64,11 +60,11 @@ describe("progress surfaces", () => {
       "ses_multi_5",
     ]);
     const completed = await Promise.all(
-      ids.map((sessionId) =>
+      ids.map((sessionId: string) =>
         invoke(tools.get("miwarang_wait"), { sessionId }, ctx),
       ),
     );
-    expect(completed.map((result) => result.content[0].text)).toEqual([
+    expect(completed.map((result: any) => result.content[0].text)).toEqual([
       "completed ses_multi_1",
       "completed ses_multi_2",
       "completed ses_multi_3",
@@ -85,23 +81,24 @@ describe("progress surfaces", () => {
 
     await invoke(
       tools.get("miwarang_delegate"),
-      { target: "agent:explore", prompt: "List files", mode: "background" },
+      { prompt: "List files", mode: "background" },
       ctx,
     );
     await commands.get("miwarang").handler("", ctx);
 
     const [text, level] = notices.at(-1);
     expect(text).toContain("ses_background");
-    expect(text).toContain("agent:explore");
+    expect(text).toContain("(opencode)");
     expect(level).toBe("info");
   });
 
   test("the command backend status line polls the run store while alive", async () => {
-    const intervals = [];
+    const intervals: number[] = [];
     const { tools } = makeHarness({
-      config: wildcardOverrideConfig,
+      config: commandOnlyConfig,
+      backends: { command: { start: async () => ({ runId: "run_command", state: "running" }) } },
       timers: {
-        setInterval: (fn, ms) => {
+        setInterval: (_fn: () => void, ms: number) => {
           intervals.push(ms);
           return intervals.length;
         },
@@ -112,7 +109,7 @@ describe("progress surfaces", () => {
 
     await invoke(
       tools.get("miwarang_delegate"),
-      { target: "category:architect", prompt: "Do it", mode: "background" },
+      { prompt: "Do it", mode: "background", backend: "command" },
       { cwd: "/workspace", ui },
     );
 

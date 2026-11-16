@@ -1,51 +1,39 @@
 import { readFile } from "node:fs/promises";
 
-export interface LiveModel {
-  id?: unknown;
-  providerID?: unknown;
-  [key: string]: unknown;
-}
+export const BACKEND_TYPES = ["opencode-cli", "command", "koma-sdk"] as const;
+
+export type BackendType = (typeof BACKEND_TYPES)[number];
 
 export interface BackendConfig {
-  type: string;
+  type: BackendType;
   command?: string;
-  [key: string]: unknown;
-}
-
-export interface RouteConfig {
-  backend: string;
-  models?: string[];
+  args?: string[];
   agent?: string;
-  blockNativeTask?: boolean | "all" | string[];
-  fallbacks?: RouteConfig[];
+  promptInput?: "stdin" | "argument";
+  timeoutMs?: number;
+  policy?: { plan: string; approval: string };
   [key: string]: unknown;
 }
 
 export interface MiwarangConfig {
   backends: Record<string, BackendConfig>;
-  routes: Record<string, RouteConfig>;
-  defaultRoute?: RouteConfig;
-  defaultModels?: string[];
-  blockNativeTask?: boolean | "all" | string[];
-  pricePolicy?: string;
+  delegation: string[];
   runsDirectory?: string;
   [key: string]: unknown;
 }
 
-export type ResolvedRoute = Omit<RouteConfig, "backend"> & {
-  backend: BackendConfig;
-  backendName: string;
-  target: string;
-  key: string;
-  models: string[];
-  fallbacks: ResolvedRoute[];
-};
+const REMOVED_KEYS: Array<[keyof MiwarangConfig & string, string]> = [
+  ["routes", "delegate by prompt instead; the delegation chain order lives in `delegation`"],
+  ["defaultRoute", "put the preferred backend first in `delegation`"],
+  ["defaultModels", "each harness owns its model; configure the backend `agent` instead"],
+  ["pricePolicy", "model selection is owned by each harness"],
+  ["defaultBackend", "put the preferred backend first in `delegation`"],
+  ["blockNativeTask", "Miwarang is a prompt-driven delegation tool; there are no targets to block"],
+];
 
-export interface RouteOverride {
-  model?: string;
-  agent?: string;
-  [key: string]: unknown;
-}
+const LEGACY_BACKEND_TYPES: Record<string, string> = {
+  "opencode-v2": "opencode-cli (OpenCode now runs through its CLI; the SDK backend was removed)",
+};
 
 export async function loadConfig(path: string): Promise<MiwarangConfig> {
   const config = JSON.parse(await readFile(path, "utf8")) as MiwarangConfig;
@@ -53,239 +41,80 @@ export async function loadConfig(path: string): Promise<MiwarangConfig> {
   return config;
 }
 
-export function resolveRoute(
-  config: MiwarangConfig,
-  target: string,
-  liveModels: LiveModel[],
-  overrides: RouteOverride = {},
-): { backend: BackendConfig; target: string; model: string; agent?: string } {
-  const route = config.routes?.[target];
-  if (!route) throw new Error(`No route configured for ${target}`);
-
-  const backend = config.backends?.[route.backend];
-  if (!backend) {
-    throw new Error(`Backend ${route.backend} configured for ${target} does not exist`);
-  }
-
-  const candidates = overrides.model ? [overrides.model] : route.models ?? [];
-  for (const modelId of candidates) {
-    const model = liveModels.find((candidate) => modelIdFor(candidate) === modelId);
-    if (!model) {
-      if (overrides.model) {
-        throw new Error(
-          `Requested model ${modelId} is not in the live model catalog ` +
-            `(catalog: ${liveModels.length} models). Omit the model override and ` +
-            "let Miwarang select a live model for the target backend.",
-        );
-      }
-      continue;
-    }
-    const result: { backend: BackendConfig; target: string; model: string; agent?: string } = {
-      backend,
-      target,
-      model: modelId,
-    };
-    const agent = overrides.agent ?? route.agent;
-    if (agent) result.agent = agent;
-    return result;
-  }
-
-  throw new Error(`No configured model is available for ${target}`);
-}
-
-export function resolveTargetRoute(
-  config: MiwarangConfig,
-  target: string,
-  { backend }: { backend?: string } = {},
-): ResolvedRoute {
-  if (typeof target !== "string" || target.length === 0) {
-    throw new Error("Target must be a non-empty string");
-  }
-  if (backend !== undefined && typeof backend !== "string") {
-    throw new Error("Backend override must be a string");
-  }
-
-  const routes = config?.routes;
-  const keys = [target];
-  if (target.startsWith("category:")) keys.push("category:*");
-  else if (target.startsWith("agent:")) keys.push("agent:*");
-
-  let route: RouteConfig | undefined;
-  let key: string | undefined;
-  for (const candidate of keys) {
-    if (routes && typeof routes === "object" && routes[candidate]) {
-      route = routes[candidate];
-      key = candidate;
-      break;
-    }
-  }
-  if (
-    !route &&
-    config?.defaultRoute &&
-    typeof config.defaultRoute === "object" &&
-    !Array.isArray(config.defaultRoute)
-  ) {
-    route = config.defaultRoute;
-    key = "defaultRoute";
-  }
-  if (!route) throw new Error(`No route configured for ${target}`);
-
-  const backendRoute =
-    backend === undefined || route.backend === backend
-      ? route
-      : (Array.isArray(route.fallbacks)
-          ? route.fallbacks.find((fallback) => fallback?.backend === backend)
-          : undefined) ?? route;
-  const backendName = backend ?? backendRoute.backend;
-  const backendObj = config?.backends?.[backendName];
-  if (!backendObj) {
-    throw new Error(`Backend ${backendName} configured for ${target} does not exist`);
-  }
-  const fallbacks =
-    backend === undefined ? resolveFallbackRoutes(config, route, target, key as string) : [];
-
-  return {
-    ...backendRoute,
-    backend: backendObj,
-    backendName,
-    target,
-    key: key as string,
-    models:
-      backendRoute.models ??
-      (backendObj.type === "opencode-v2" ? [] : config?.defaultModels ?? []),
-    fallbacks,
-  };
-}
-
-const PRICE_POLICIES = ["free-only", "free-first", "any"];
-
-function validateRouteShape(
-  name: string,
-  route: RouteConfig,
-  config: MiwarangConfig,
-  allowFallbacks = true,
-): void {
-  void config;
-  if (!route || typeof route.backend !== "string") {
-    throw new Error(`Route ${name} must name a backend`);
-  }
-  if (route.models !== undefined) {
-    if (!Array.isArray(route.models) || route.models.some((model) => typeof model !== "string")) {
-      throw new Error(`Route ${name} must define a models string array`);
-    }
-  }
-  if (route.blockNativeTask !== undefined) {
-    validateBlockNativeTask(route.blockNativeTask, `Route ${name}`);
-  }
-  if (route.fallbacks !== undefined) {
-    if (!allowFallbacks) {
-      throw new Error(`${name} must not define nested fallbacks`);
-    }
-    if (!Array.isArray(route.fallbacks)) {
-      throw new Error(`${name} fallbacks must be a route object array`);
-    }
-    route.fallbacks.forEach((fallback, index) => {
-      validateRouteShape(`${name}.fallbacks[${index}]`, fallback, config, false);
-    });
-  }
-}
-
-function validateBlockNativeTask(value: boolean | "all" | string[], where: string): void {
-  if (typeof value === "boolean" || value === "all") return;
-  if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) return;
-  throw new Error(`${where} blockNativeTask must be a boolean, "all", or a string array`);
-}
-
 export function validateConfig(config: MiwarangConfig): void {
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     throw new Error("Miwarang config must be a JSON object");
   }
+  for (const [key, guidance] of REMOVED_KEYS) {
+    if (config[key] !== undefined) {
+      throw new Error(
+        `Miwarang config key "${key}" was removed in v0.9.0: ${guidance}. ` +
+          "See docs/releases/v0.9.0.md for the migration example.",
+      );
+    }
+  }
   if (!config.backends || typeof config.backends !== "object" || Array.isArray(config.backends)) {
     throw new Error("Miwarang config must define a backends object");
   }
-  if (!config.routes || typeof config.routes !== "object" || Array.isArray(config.routes)) {
-    throw new Error("Miwarang config must define a routes object");
+  const backendIds = Object.keys(config.backends);
+  if (!backendIds.length) {
+    throw new Error("Miwarang config must define at least one backend");
   }
-
-  // The shared candidate chain: a route may omit `models` and inherit this
-  // list, so the model ordering lives in one place unless a route overrides it.
+  for (const [id, backend] of Object.entries(config.backends)) {
+    validateBackend(id, backend);
+  }
   if (
-    config.defaultModels !== undefined &&
-    (!Array.isArray(config.defaultModels) ||
-      config.defaultModels.some((model) => typeof model !== "string"))
+    !Array.isArray(config.delegation) ||
+    config.delegation.length === 0 ||
+    config.delegation.some((id) => typeof id !== "string")
   ) {
-    throw new Error("defaultModels must be a string array");
+    throw new Error("Miwarang config must define a delegation array of backend ids");
   }
-  for (const [target, route] of Object.entries(config.routes)) {
-    validateRouteShape(target, route, config);
-  }
-
-  if (config.defaultRoute !== undefined) {
-    if (
-      !config.defaultRoute ||
-      typeof config.defaultRoute !== "object" ||
-      Array.isArray(config.defaultRoute)
-    ) {
-      throw new Error("defaultRoute must be a route object");
+  const seen = new Set<string>();
+  for (const id of config.delegation) {
+    if (!config.backends[id]) {
+      throw new Error(`Delegation chain references unknown backend ${id}`);
     }
-    validateRouteShape("defaultRoute", config.defaultRoute, config);
-  }
-
-  if (config.blockNativeTask !== undefined) {
-    validateBlockNativeTask(config.blockNativeTask, "Top-level");
-    if (config.blockNativeTask === "all") {
-      const hasWildcard = Object.keys(config.routes).some(
-        (name) => name === "category:*" || name === "agent:*",
-      );
-      if (!hasWildcard && !config.defaultRoute) {
-        throw new Error(
-          `blockNativeTask "all" requires a wildcard route (category:* or agent:*) ` +
-            `or defaultRoute so every target is covered`,
-        );
-      }
+    if (seen.has(id)) {
+      throw new Error(`Delegation chain lists backend ${id} more than once`);
     }
+    seen.add(id);
   }
-
-  if (config.pricePolicy !== undefined && !PRICE_POLICIES.includes(config.pricePolicy)) {
-    throw new Error(`pricePolicy must be one of: ${PRICE_POLICIES.join(", ")}`);
-  }
-
 }
 
-function modelIdFor(model: LiveModel): string {
-  if (!model || typeof model.id !== "string" || model.id === "") return "";
-  // Command CLIs list some models without a provider prefix; the bare id is
-  // then the whole identifier and must match the configured candidate as-is.
-  return typeof model.providerID === "string" && model.providerID !== ""
-    ? `${model.providerID}/${model.id}`
-    : model.id;
-}
-
-function resolveFallbackRoutes(
-  config: MiwarangConfig,
-  route: RouteConfig,
-  target: string,
-  key: string,
-): ResolvedRoute[] {
-  if (!Array.isArray(route.fallbacks)) return [];
-  return route.fallbacks.map((fallback, index) => {
-    const backendName = fallback.backend;
-    const backend = config?.backends?.[backendName];
-    if (!backend) {
-      throw new Error(
-        `Backend ${backendName} configured for ${target} fallback ${index} does not exist`,
-      );
-    }
-    return {
-      ...fallback,
-      backend,
-      backendName,
-      target,
-      key: `${key}.fallbacks[${index}]`,
-      models:
-        fallback.models ?? (backend.type === "opencode-v2" ? [] : config?.defaultModels ?? []),
-      agent: fallback.agent ?? route.agent,
-      fallbacks: [],
-    };
-  });
+function validateBackend(id: string, backend: BackendConfig): void {
+  if (!backend || typeof backend !== "object" || Array.isArray(backend)) {
+    throw new Error(`Backend ${id} must be an object`);
+  }
+  const legacy = LEGACY_BACKEND_TYPES[backend.type as string];
+  if (legacy) {
+    throw new Error(
+      `Backend ${id} uses removed type "${backend.type}"; use ${legacy}.`,
+    );
+  }
+  if (!BACKEND_TYPES.includes(backend.type as BackendType)) {
+    throw new Error(
+      `Backend ${id} has unknown type ${String(backend.type)}; expected one of ${BACKEND_TYPES.join(", ")}`,
+    );
+  }
+  if (backend.agent !== undefined && typeof backend.agent !== "string") {
+    throw new Error(`Backend ${id} agent must be a string`);
+  }
+  if (backend.type === "koma-sdk") return;
+  if (typeof backend.command !== "string" || !backend.command) {
+    throw new Error(`Backend ${id} must define a command`);
+  }
+  if (
+    !Array.isArray(backend.args) ||
+    backend.args.some((arg) => typeof arg !== "string")
+  ) {
+    throw new Error(`Backend ${id} args must be a string array`);
+  }
+  if (
+    backend.promptInput !== undefined &&
+    backend.promptInput !== "stdin" &&
+    backend.promptInput !== "argument"
+  ) {
+    throw new Error(`Backend ${id} promptInput must be stdin or argument`);
+  }
 }

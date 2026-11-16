@@ -125,14 +125,12 @@ export async function backendForRun(
       return record.backend;
     }
   }
-  if (runId.startsWith("ses_")) {
-    const entry = Object.entries(config.backends).find(([, backend]) => backend.type === "opencode-v2");
-    if (entry) return entry[0];
+  const order = Array.isArray(config.delegation) ? config.delegation : Object.keys(config.backends);
+  if (!runId) {
+    throw new Error(`Cannot determine backend for run ID ${runId}`);
   }
-  if (runId.startsWith("run_")) {
-    const entry = Object.entries(config.backends).find(([, backend]) => backend.type === "command");
-    if (entry) return entry[0];
-  }
+  const candidate = order.find((id) => config.backends[id as string]);
+  if (candidate) return candidate;
   throw new Error(`Cannot determine backend for run ID ${runId}`);
 }
 

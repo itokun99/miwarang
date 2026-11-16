@@ -1,233 +1,116 @@
 import { describe, expect, test } from "bun:test";
-import {
-  config,
-  invoke,
-  legacyConfig,
-  makeHarness,
-  wildcardConfig,
-  wildcardOverrideConfig,
-} from "./support/extension-harness.ts";
+import { invoke, makeHarness } from "./support/extension-harness.ts";
 
-describe("delegate routing", () => {
-  test("OpenCode uses its configured session defaults without querying its catalog", async () => {
-    let catalogReads = 0;
-    const calls = [];
-    const opencode = {
-      listModels: async () => {
-        catalogReads += 1;
-        throw new Error("OpenCode catalog must not select the session model");
-      },
-      runForeground: async (request) => {
-        calls.push(request);
-        return { sessionId: "ses_default", text: "Harness result" };
-      },
-      start: async (request) => {
-        calls.push(request);
-        return { sessionId: "ses_default_bg", state: "running" };
-      },
-      wait: async () => ({}),
-      cancel: async () => ({}),
-    };
-    const { tools } = makeHarness({ backends: { opencode } });
+function commandBackend(overrides = {}) {
+  return {
+    runForeground: async () => {
+      throw new Error("primary must not run");
+    },
+    start: async () => ({ runId: "run_primary", state: "running" }),
+    wait: async () => ({}),
+    cancel: async () => ({}),
+    ...overrides,
+  };
+}
+
+describe("delegation chain", () => {
+  test("the primary backend receives the prompt and its configured agent", async () => {
+    const { tools, calls } = makeHarness();
 
     const result = await invoke(tools.get("miwarang_delegate"), {
-      target: "category:quick",
       prompt: "Inspect this project",
     });
 
-    expect(catalogReads).toBe(0);
     expect(calls).toEqual([
-      {
-        cwd: "/workspace",
-        target: "category:quick",
-        prompt: "Inspect this project",
-      },
+      [
+        "foreground",
+        { cwd: "/workspace", prompt: "Inspect this project", agent: "Orchestrator" },
+      ],
     ]);
+    expect(result.content[0].text).toBe("Foreground result");
+    expect(result.details).toMatchObject({ backend: "opencode", resolvedVia: "primary" });
     expect(result.details).not.toHaveProperty("model");
   });
 
-  test("OpenCode rejects explicit model and agent overrides", async () => {
-    const { tools, calls } = makeHarness();
-
-    await expect(
-      invoke(tools.get("miwarang_delegate"), {
-        target: "category:quick",
-        prompt: "Inspect this project",
-        model: "provider/model",
-      }),
-    ).rejects.toThrow(/OpenCode uses its configured default model/);
-    await expect(
-      invoke(tools.get("miwarang_delegate"), {
-        target: "category:quick",
-        prompt: "Inspect this project",
-        agent: "explore",
-      }),
-    ).rejects.toThrow(/OpenCode uses its configured default model/);
-    expect(calls).toEqual([]);
-  });
-
-  test("CommandCode sends task intent to the backend without a Miwarang-selected model", async () => {
-    const calls = [];
+  test("quota failures advance to the next backend in the delegation chain", async () => {
+    const opencode = commandBackend({
+      runForeground: async () => {
+        throw new Error(
+          "Configured command failed with exit code 1: You've reached your 5-hour usage limit",
+        );
+      },
+    });
     const commandcode = {
-      listModels: async () => {
-        throw new Error("command model list must not be queried");
-      },
-      runForeground: async (request) => {
-        calls.push(request);
-        return { sessionId: "ses_command", text: "Command result" };
-      },
+      runForeground: async () => ({ sessionId: "ses_command", text: "Command fallback result" }),
       start: async () => ({ runId: "run_command", state: "running" }),
       wait: async () => ({}),
       cancel: async () => ({}),
     };
-    const commandConfig = {
-      backends: { commandcode: { type: "command", command: "commandcode" } },
-      routes: {
-        "category:writing": { backend: "commandcode" },
-      },
-    };
-    const { tools } = makeHarness({ config: commandConfig, backends: { commandcode } });
+    const { tools } = makeHarness({ backends: { opencode, commandcode, koma: commandcode } });
 
     const result = await invoke(tools.get("miwarang_delegate"), {
-      target: "category:writing",
-      prompt: "Write the docs",
+      prompt: "Inspect this project",
     });
 
-    expect(calls).toEqual([
-      { cwd: "/workspace", target: "category:writing", prompt: "Write the docs" },
-    ]);
-    expect(result.details).not.toHaveProperty("model");
-    expect(result.details).toMatchObject({ backend: "commandcode", resolvedVia: "exact" });
-  });
-
-  test("a command backend model comes from its own config, not Miwarang selection", async () => {
-    const commandConfig = {
-      backends: {
-        commandcode: { type: "command", command: "commandcode", model: "qwen/qwen3.8-max" },
-      },
-      routes: {
-        "category:writing": { backend: "commandcode" },
-      },
-    };
-    const { tools, calls } = makeHarness({ config: commandConfig });
-
-    const result = await invoke(tools.get("miwarang_delegate"), {
-      target: "category:writing",
-      prompt: "Write the docs",
-    });
-
-    expect(calls[0][1]).toEqual({
-      cwd: "/workspace",
-      target: "category:writing",
-      prompt: "Write the docs",
-    });
-    expect(result.details).not.toHaveProperty("model");
-  });
-
-  test("a wildcard OpenCode target reports route provenance without a model", async () => {
-    const { tools, calls } = makeHarness({ config: wildcardConfig });
-
-    const result = await invoke(tools.get("miwarang_delegate"), {
-      target: "category:writing",
-      prompt: "Write the docs",
-    });
-
-    expect(calls[0][1]).toEqual({
-      cwd: "/workspace",
-      target: "category:writing",
-      prompt: "Write the docs",
-    });
-    expect(result.details).toMatchObject({
-      backend: "opencode",
-      resolvedVia: "wildcard",
-      target: "category:writing",
-    });
-    expect(result.details).not.toHaveProperty("model");
-  });
-
-  test("a backend override keeps the backend-configured model, not a route model", async () => {
-    const { tools, calls } = makeHarness({ config: wildcardOverrideConfig });
-
-    const result = await invoke(tools.get("miwarang_delegate"), {
-      target: "category:writing",
-      prompt: "Write the docs",
-      backend: "commandcode",
-    });
-
-    expect(calls[0][1]).toEqual({
-      cwd: "/workspace",
-      target: "category:writing",
-      prompt: "Write the docs",
-    });
+    expect(result.content[0].text).toBe("Command fallback result");
     expect(result.details).toMatchObject({
       backend: "commandcode",
-      resolvedVia: "wildcard",
+      fallback: true,
+      fallbackIndex: 1,
+      agent: "General",
     });
-    expect(result.details).not.toHaveProperty("model");
   });
 
-  test("OpenCode ignores an OMO route agent name and keeps the configured orchestrator", async () => {
-    const { tools, calls } = makeHarness({ config: legacyConfig });
+  test("non-provider failures stop immediately instead of burning the chain", async () => {
+    const opencode = commandBackend({
+      runForeground: async () => {
+        throw new Error("Configured command failed with exit code 2: bad flags");
+      },
+    });
+    const commandcode = {
+      runForeground: async () => {
+        throw new Error("fallback must not run");
+      },
+    };
+    const { tools } = makeHarness({ backends: { opencode, commandcode, koma: commandcode } });
 
-    await invoke(tools.get("miwarang_delegate"), {
-      target: "agent:explore",
-      prompt: "List relevant files",
+    await expect(
+      invoke(tools.get("miwarang_delegate"), { prompt: "Inspect this project" }),
+    ).rejects.toThrow(/bad flags/);
+  });
+
+  test("a background start failure falls back before a run ID is returned", async () => {
+    const opencode = commandBackend({
+      start: async () => {
+        throw new Error("OpenCode session ses_x failed: quota exhausted");
+      },
+    });
+    const commandcode = {
+      start: async () => ({ runId: "run_command", state: "running" }),
+    };
+    const { tools, calls } = makeHarness({ backends: { opencode, commandcode, koma: commandcode } });
+
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      prompt: "Inspect this project",
       mode: "background",
     });
 
-    expect(calls[0][1]).toEqual({
-      cwd: "/workspace",
-      target: "agent:explore",
-      prompt: "List relevant files",
-    });
+    expect(result.details).toMatchObject({ backend: "commandcode", fallback: true });
+    expect(result.details).toHaveProperty("runId", "run_command");
   });
 
-  test("a default OpenCode route runs without a Miwarang model candidate", async () => {
-    const config = {
-      backends: { opencode: { type: "opencode-v2", command: "opencode" } },
-      routes: {},
-      defaultRoute: { backend: "opencode" },
-    };
-    const { tools, calls } = makeHarness({ config });
-
-    const result = await invoke(tools.get("miwarang_delegate"), {
-      target: "category:brand-new",
-      prompt: "Hello",
+  test("an exhausted chain surfaces the last provider error", async () => {
+    const failing = () => ({
+      runForeground: async () => {
+        throw new Error("Configured command failed with exit code 1: rate limit");
+      },
     });
-
-    expect(calls[0][1]).toEqual({
-      cwd: "/workspace",
-      target: "category:brand-new",
-      prompt: "Hello",
+    const { tools } = makeHarness({
+      backends: { opencode: failing(), commandcode: failing(), koma: failing() },
     });
-    expect(result.details).toMatchObject({ backend: "opencode", resolvedVia: "default" });
-    expect(result.details).not.toHaveProperty("model");
-  });
-
-  test("rejects an override to an unknown backend", async () => {
-    const { tools } = makeHarness({ config: wildcardConfig });
 
     await expect(
-      invoke(tools.get("miwarang_delegate"), {
-        target: "category:writing",
-        prompt: "Write the docs",
-        backend: "missing",
-      }),
-    ).rejects.toThrow("Backend missing is not configured");
-  });
-
-  test("an unconfigured target still fails closed", async () => {
-    const bare = {
-      backends: { opencode: { type: "opencode-v2", command: "opencode" } },
-      routes: {},
-    };
-    const { tools } = makeHarness({ config: bare });
-
-    await expect(
-      invoke(tools.get("miwarang_delegate"), {
-        target: "category:unknown",
-        prompt: "Do the thing",
-      }),
-    ).rejects.toThrow("No route configured for category:unknown");
+      invoke(tools.get("miwarang_delegate"), { prompt: "Inspect this project" }),
+    ).rejects.toThrow(/rate limit/);
   });
 });

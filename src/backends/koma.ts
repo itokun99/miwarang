@@ -31,7 +31,6 @@ export interface KomaConfig {
 interface KomaRequest {
   cwd?: string;
   prompt: string;
-  model?: string;
 }
 
 export interface KomaDependencies {
@@ -71,7 +70,7 @@ export function createKomaBackend(config: KomaConfig = {}, dependencies: KomaDep
   const runStore = dependencies.runStore ?? new RunStore();
   const sessions = new Map<string, Session>();
 
-  async function openSession({ cwd, prompt, model }: KomaRequest) {
+  async function openSession({ cwd, prompt }: KomaRequest) {
     const workdir = typeof cwd === "string" && cwd ? cwd : process.cwd();
     const child = spawn(command, args, {
       cwd: workdir,
@@ -83,7 +82,6 @@ export function createKomaBackend(config: KomaConfig = {}, dependencies: KomaDep
       assertHello(await connection.hello());
       const created = await connection.request("create", {
         cwd: workdir,
-        ...(typeof model === "string" && model ? { model_id: model } : {}),
         policy,
       });
       const submitted = await connection.request("submit", { text: prompt });

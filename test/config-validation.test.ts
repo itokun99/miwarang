@@ -1,239 +1,109 @@
 import { describe, expect, test } from "bun:test";
-import { resolveTargetRoute, validateConfig } from "../src/config.ts";
+import { validateConfig } from "../src/config.ts";
 
-const opencodeBackend = { opencode: { type: "opencode-v2", command: "opencode" } };
-const commandBackend = { commandcode: { type: "command", command: "commandcode" } };
-const base = {
-  backends: opencodeBackend,
-  routes: { "category:quick": { backend: "opencode", models: ["m"] } },
+function validateConfigHelper(config: unknown) {
+  return validateConfig(config as never);
+}
+
+const validConfig = {
+  backends: {
+    opencode: {
+      type: "opencode-cli",
+      command: "opencode",
+      args: ["run", "--agent", "{{agent}}"],
+      agent: "Orchestrator",
+    },
+    commandcode: {
+      type: "command",
+      command: "commandcode",
+      args: ["-p", "-t"],
+      agent: "General",
+    },
+    koma: { type: "koma-sdk", command: "koma", args: ["sdk", "serve"] },
+  },
+  delegation: ["opencode", "commandcode", "koma"],
 };
 
-describe("validateConfig", () => {
-  test("accepts wildcard route keys", () => {
-    expect(() =>
-      validateConfig({
-        ...base,
-        routes: {
-          "category:*": { backend: "opencode", models: ["m"] },
-          "agent:*": { backend: "opencode", models: ["m"] },
-        },
-      }),
-    ).not.toThrow();
+describe("config v2 validation", () => {
+  test("accepts the documented example shape", () => {
+    expect(() => validateConfigHelper(validConfig)).not.toThrow();
   });
 
-  test("accepts an OpenCode route without a Miwarang model list", () => {
+  test("rejects legacy routes with migration guidance", () => {
     expect(() =>
-      validateConfig({
-        backends: opencodeBackend,
+      validateConfigHelper({
+        ...validConfig,
         routes: { "category:quick": { backend: "opencode" } },
-        defaultRoute: { backend: "opencode" },
       }),
-    ).not.toThrow();
+    ).toThrow(/"routes" was removed in v0.9.0/);
   });
 
-  test("accepts a command route without models (backend owns its model)", () => {
+  test("rejects other removed keys with migration guidance", () => {
+    for (const key of ["defaultRoute", "defaultModels", "pricePolicy", "defaultBackend", "blockNativeTask"]) {
+      expect(() => validateConfigHelper({ ...validConfig, [key]: {} })).toThrow(
+        new RegExp(`"${key}" was removed in v0.9.0`),
+      );
+    }
+  });
+
+  test("rejects the removed opencode-v2 backend type with a pointer to the CLI type", () => {
     expect(() =>
-      validateConfig({
-        backends: commandBackend,
-        routes: { "category:writing": { backend: "commandcode" } },
+      validateConfigHelper({
+        backends: { opencode: { type: "opencode-v2", command: "opencode" } },
+        delegation: ["opencode"],
       }),
-    ).not.toThrow();
+    ).toThrow(/removed type "opencode-v2".*opencode-cli/s);
   });
 
-  test("rejects a malformed models list on a command route", () => {
-    expect(() =>
-      validateConfig({
-        backends: commandBackend,
-        routes: { "category:writing": { backend: "commandcode", models: ["m", 3] } },
-      }),
-    ).toThrow(/category:writing must define a models string array/);
-  });
-
-  test("accepts a valid defaultRoute", () => {
-    expect(() =>
-      validateConfig({
-        ...base,
-        defaultRoute: { backend: "opencode", models: ["m"] },
-      }),
-    ).not.toThrow();
-  });
-
-  test("accepts a defaultRoute without models (backend owns its model)", () => {
-    expect(() =>
-      validateConfig({
-        backends: commandBackend,
-        routes: { "category:writing": { backend: "commandcode" } },
-        defaultRoute: { backend: "commandcode" },
-      }),
-    ).not.toThrow();
-  });
-
-  test("accepts blockNativeTask as boolean, string array, and per-route", () => {
-    expect(() => validateConfig({ ...base, blockNativeTask: true })).not.toThrow();
-    expect(() =>
-      validateConfig({ ...base, blockNativeTask: ["category:quick"] }),
-    ).not.toThrow();
-    expect(() =>
-      validateConfig({
-        ...base,
-        routes: {
-          "category:quick": {
-            backend: "opencode",
-            models: ["m"],
-            blockNativeTask: ["category:*"],
-          },
-        },
-      }),
-    ).not.toThrow();
-  });
-
-  test("rejects a malformed blockNativeTask", () => {
-    expect(() => validateConfig({ ...base, blockNativeTask: 7 })).toThrow(
-      /blockNativeTask/,
-    );
-  });
-
-  test("accepts backend fallback route objects", () => {
-    expect(() =>
-      validateConfig({
-        ...base,
-        backends: {
-          ...base.backends,
-          ...commandBackend,
-        },
-        routes: {
-          "category:quick": {
-            backend: "opencode",
-            fallbacks: [{ backend: "commandcode", models: ["qwen/model"] }],
-          },
-        },
-      }),
-    ).not.toThrow();
-  });
-
-  test("rejects malformed or nested backend fallbacks", () => {
-    expect(() =>
-      validateConfig({
-        ...base,
-        routes: {
-          "category:quick": {
-            backend: "opencode",
-            fallbacks: { backend: "opencode", models: ["m"] },
-          },
-        },
-      }),
-    ).toThrow(/fallbacks must be a route object array/);
-    expect(() =>
-      validateConfig({
-        ...base,
-        backends: {
-          ...base.backends,
-          ...commandBackend,
-        },
-        routes: {
-          "category:quick": {
-            backend: "opencode",
-            fallbacks: [
-              {
-                backend: "commandcode",
-                models: ["m"],
-                fallbacks: [{ backend: "opencode" }],
-              },
-            ],
-          },
-        },
-      }),
-    ).toThrow(/must not define nested fallbacks/);
-  });
-
-  test("accepts a known pricePolicy", () => {
-    expect(() => validateConfig({ ...base, pricePolicy: "free-only" })).not.toThrow();
-  });
-
-  test("rejects an unknown pricePolicy", () => {
-    expect(() => validateConfig({ ...base, pricePolicy: "cheapest" })).toThrow(
-      /pricePolicy/,
-    );
-  });
-
-  test('fail-fast: blockNativeTask "all" requires a wildcard route or defaultRoute', () => {
-    expect(() => validateConfig({ ...base, blockNativeTask: "all" })).toThrow(
-      /blockNativeTask "all"/,
+  test("requires a non-empty delegation chain of known backends", () => {
+    expect(() => validateConfigHelper({ backends: validConfig.backends, delegation: [] })).toThrow(
+      /delegation array/,
     );
     expect(() =>
-      validateConfig({
-        ...base,
-        blockNativeTask: "all",
-        defaultRoute: { backend: "opencode" },
+      validateConfigHelper({ backends: validConfig.backends, delegation: ["missing"] }),
+    ).toThrow(/unknown backend missing/);
+    expect(() =>
+      validateConfigHelper({ backends: validConfig.backends, delegation: ["opencode", "opencode"] }),
+    ).toThrow(/more than once/);
+    expect(() => validateConfigHelper({ backends: validConfig.backends })).toThrow(/delegation array/);
+  });
+
+  test("validates backend shapes per type", () => {
+    expect(() =>
+      validateConfigHelper({
+        backends: { bad: { type: "command", args: ["-p"] } },
+        delegation: ["bad"],
+      }),
+    ).toThrow(/must define a command/);
+    expect(() =>
+      validateConfigHelper({
+        backends: { bad: { type: "command", command: "x", args: "nope" } },
+        delegation: ["bad"],
+      }),
+    ).toThrow(/args must be a string array/);
+    expect(() =>
+      validateConfigHelper({
+        backends: { bad: { type: "warp", command: "x", args: [] } },
+        delegation: ["bad"],
+      }),
+    ).toThrow(/unknown type warp/);
+    expect(() =>
+      validateConfigHelper({
+        backends: { bad: { type: "opencode-cli", command: "opencode", args: [], agent: 7 } },
+        delegation: ["bad"],
+      }),
+    ).toThrow(/agent must be a string/);
+    expect(() =>
+      validateConfigHelper({
+        backends: { bad: { type: "koma-sdk", command: "koma", args: ["sdk", "serve"], agent: "Koma" } },
+        delegation: ["bad"],
       }),
     ).not.toThrow();
-    expect(() =>
-      validateConfig({
-        ...base,
-        blockNativeTask: "all",
-        routes: { "category:*": { backend: "opencode" } },
-      }),
-    ).not.toThrow();
   });
 
-  test("still rejects a missing routes object", () => {
-    expect(() => validateConfig({ backends: base.backends })).toThrow(
-      /routes object/,
-    );
-  });
-});
-
-describe("defaultModels inheritance", () => {
-  test("validateConfig accepts command routes without models when defaultModels exists", () => {
-    expect(() =>
-      validateConfig({
-        backends: commandBackend,
-        defaultModels: ["qwen/model"],
-        routes: { "category:writing": { backend: "commandcode" } },
-      }),
-    ).not.toThrow();
-  });
-
-  test("validateConfig accepts command routes without models or defaultModels (backend owns its model)", () => {
-    expect(() =>
-      validateConfig({
-        backends: commandBackend,
-        routes: { "category:writing": { backend: "commandcode" } },
-      }),
-    ).not.toThrow();
-  });
-
-  test("validateConfig rejects a malformed defaultModels", () => {
-    expect(() =>
-      validateConfig({
-        backends: commandBackend,
-        defaultModels: "qwen/model",
-        routes: {},
-      }),
-    ).toThrow(/defaultModels must be a string array/);
-    expect(() =>
-      validateConfig({
-        backends: commandBackend,
-        defaultModels: [7],
-        routes: {},
-      }),
-    ).toThrow(/defaultModels/);
-  });
-
-  test("resolveTargetRoute inherits defaultModels unless a command route overrides", () => {
-    const config = {
-      backends: commandBackend,
-      defaultModels: ["reflection/beam:free", "deepseek/flash"],
-      routes: {
-        "category:writing": { backend: "commandcode" },
-        "category:docs": { backend: "commandcode", models: ["qwen/flash"] },
-      },
-    };
-
-    expect(resolveTargetRoute(config, "category:writing").models).toEqual([
-      "reflection/beam:free",
-      "deepseek/flash",
-    ]);
-    expect(resolveTargetRoute(config, "category:docs").models).toEqual(["qwen/flash"]);
+  test("rejects non-object configs", () => {
+    expect(() => validateConfigHelper(null)).toThrow(/must be a JSON object/);
+    expect(() => validateConfigHelper([])).toThrow(/must be a JSON object/);
+    expect(() => validateConfigHelper({})).toThrow(/backends object/);
   });
 });

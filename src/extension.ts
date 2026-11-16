@@ -4,9 +4,7 @@ import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import { createCommandBackend } from "./backends/command.ts";
 import { createKomaBackend } from "./backends/koma.ts";
-import { createOpenCodeBackend } from "./backends/opencode.ts";
 import { executeDelegate } from "./delegate-routing.ts";
-import { registerNativeTaskHook } from "./native-task.ts";
 import { RunStore } from "./runs/store.ts";
 import { registerRunTools } from "./run-tools.ts";
 import {
@@ -19,6 +17,12 @@ import type { BackendAdapter, DelegateRequest } from "./delegate-routing.ts";
 import type { RunTracker, TrackedRun } from "./watch.ts";
 
 const STATUS_POLL_MS = 15_000;
+
+const OPENCODE_DEFAULTS = {
+  command: "opencode",
+  args: ["run", "--agent", "{{agent}}"],
+  promptInput: "argument" as const,
+};
 
 export interface PiContext {
   cwd?: string;
@@ -94,33 +98,17 @@ export function setupExtension(
     name: "miwarang_delegate",
     label: "Delegate task",
     description:
-      "Delegate an OMO task to the configured OpenCode or Command Code harness.",
+      "Delegate a task to the configured second-orchestrator harnesses (OpenCode CLI, Command Code, Koma) by prompt.",
     promptSnippet:
-      "Delegate OMO route tasks through the configured backend.",
+      "Delegate tasks through the configured backend delegation chain.",
     promptGuidelines: [
-      "Use miwarang_delegate instead of native task for these targets: " +
-        "category:quick, category:unspecified-low, category:unspecified-high, " +
-        "category:deep-low, category:deep-high, category:ultrabrain, category:artistry, " +
-        "category:architect, category:writing, and category:visual-engineering, plus " +
-        "agent:explore, agent:librarian, agent:plan-consultant, agent:plan-reviewer, " +
-        "agent:omo-native-code-reviewer, agent:omo-native-gate-reviewer, and " +
-        "agent:omo-native-qa-executor. Routes resolve exact key first, then the " +
-        "category:* or agent:* wildcard, then defaultRoute. Pass the full target " +
-        "prefix, preserve the task prompt, and map run_in_background to mode background.",
-      "Use miwarang_wait or miwarang_cancel with the returned session or run ID for background work.",
-      "Background delegations are tracked automatically: the session status line lists active runs, /miwarang shows the full table, and miwarang_wait returns the terminal result.",
-      "OMO configuration supplies intent/category only. Never copy a model or backend from omo.jsonc or the OMO session.",
-      "OpenCode uses its configured default model and the orchestrator agent; Miwarang does not inspect its model catalog or apply a freeOnly filter.",
-      "Command Code uses its General agent by default. Keep the harness agent and agent_output tools enabled so General can route to available agents.",
-      "Command backends select configured model candidates in order without a freeOnly filter. OMO target agent:<name> selects a Miwarang route, not a harness agent override.",
-      "Only target and prompt are required. Omit backend, model, and agent in normal routing. mode defaults to foreground; use background only for asynchronous work. Omit cwd to inherit the active workspace.",
-      "Routes may define ordered fallbacks with their own backend and model list. Omit backend to let Miwarang choose a configured fallback with the correct harness-specific models; pass backend only for an intentional user-required override. Foreground provider failures may continue through fallbacks, and background runtime failures are reported instead of retried silently.",
+      "miwarang_delegate is a unified prompt-driven delegation tool: pass the complete task prompt and let the configured backend harnesses own their models and agents.",
+      "Only prompt is required. mode defaults to foreground; use background only for asynchronous work. Omit cwd to inherit the active workspace context.",
+      "Omit backend to follow the configured delegation chain order. Pass backend only for an intentional user-required override. Foreground provider failures may continue through the chain; background runtime failures are reported instead of retried silently.",
+      "Each backend's agent comes from the Miwarang config (for example an Orchestrator agent for OpenCode); Miwarang never selects or overrides a model.",
+      "Use miwarang_wait or miwarang_cancel with the returned run ID for background work. Background delegations are tracked glm-5.3-flashmatically: the session status line lists active runs, /miwarang shows the full table, and miwarang_wait returns the terminal result.",
     ],
     parameters: Type.Object({
-      target: Type.String({
-        description:
-          "Required. Full Miwarang route key with its prefix: category:<name> or agent:<name>.",
-      }),
       prompt: Type.String({
         description:
           "Required. Complete delegated task, preserving the original constraints and acceptance criteria.",
@@ -137,19 +125,7 @@ export function setupExtension(
       backend: Type.Optional(
         Type.String({
           description:
-            "Optional harness override. Omit in normal routing so Miwarang selects the configured route and fallback chain.",
-        }),
-      ),
-      model: Type.Optional(
-        Type.String({
-          description:
-            "Optional command-backend model override from that route's candidate list. OpenCode uses its configured default model; do not set model for OpenCode.",
-        }),
-      ),
-      agent: Type.Optional(
-        Type.String({
-          description:
-            "Optional command-line agent argument when the backend args use {{agent}}. OpenCode always uses orchestrator; Command Code uses General and its internal agent tool. This is not the OMO target agent:<name>.",
+            "Optional harness override. Omit in normal routing so Miwarang follows the configured delegation chain.",
         }),
       ),
       cwd: Type.Optional(
@@ -162,34 +138,22 @@ export function setupExtension(
     async execute(
       _toolCallId: string,
       params: {
-        target: string;
         prompt: string;
         mode?: "foreground" | "background";
         backend?: string;
-        model?: string;
-        agent?: string;
         cwd?: string;
       },
       _signal: unknown,
       _onUpdate: unknown,
       ctx?: PiContext,
     ) {
-      const target = normalizeTarget(params.target);
       const execution = await executeDelegate(config, backends, {
-        target,
         prompt: params.prompt,
         mode: params.mode ?? "foreground",
         backend: params.backend,
-        model: params.model,
-        agent: params.agent,
         cwd: params.cwd ?? ctx?.cwd ?? pi.cwd ?? process.cwd(),
       } as DelegateRequest);
-      const {
-        result,
-        selected,
-        mode,
-        resolvedVia: resolvedViaValue,
-      } = execution;
+      const { result, selected, mode, resolvedVia } = execution;
 
       if (mode === "background") {
         const id = result.sessionId ?? result.runId;
@@ -198,21 +162,19 @@ export function setupExtension(
           id: id as string,
           backend: selected.backendId,
           backendType: selected.backend.type,
-          target,
           startedAt: Date.now(),
           ...(omoThreadId !== undefined ? { omoThreadId } : {}),
         } as TrackedRun);
         syncStatus(ctx);
-        const text = `Started ${target} in background (${id}).`;
+        const text = `Started background delegation (${id}).`;
         return {
           content: [{ type: "text", text }],
           details: {
             ...result,
             backend: selected.backendId,
-            resolvedVia: resolvedViaValue,
-            target,
+            resolvedVia,
             ...(omoThreadId !== undefined ? { omoThreadId } : {}),
-            ...(selected.model === undefined ? {} : { model: selected.model }),
+            ...(selected.agent === undefined ? {} : { agent: selected.agent }),
             ...(selected.index > 0
               ? { fallback: true, fallbackIndex: selected.index }
               : {}),
@@ -224,37 +186,34 @@ export function setupExtension(
         details: {
           sessionId: result.sessionId,
           backend: selected.backendId,
-          resolvedVia: resolvedViaValue,
-          target,
-          ...(selected.model === undefined ? {} : { model: selected.model }),
+          resolvedVia,
+          ...(selected.agent === undefined ? {} : { agent: selected.agent }),
           ...(selected.index > 0 ? { fallback: true, fallbackIndex: selected.index } : {}),
         },
       };
     },
   });
-
   registerRunTools(pi as any, { config, backends: backends as Record<string, BackendAdapter>, store, tracker, syncStatus });
-  registerNativeTaskHook(pi as never, config);
 }
-
 function createBackends(config: MiwarangConfig, store: RunStore = new RunStore({ directory: config.runsDirectory })) {
   const backends: Record<string, BackendAdapter> = {};
   for (const [id, backend] of Object.entries(config.backends)) {
-    if (backend.type === "opencode-v2") {
-      backends[id] = createOpenCodeBackend({ command: backend.command });
-    } else if (backend.type === "command") {
-      backends[id] = createCommandBackend({ ...backend, id } as never, { runStore: store });
-    } else if (backend.type === "koma-sdk") {
-      backends[id] = createKomaBackend({ ...backend, id }, { runStore: store });
-    } else {
-      throw new Error(`Unknown backend type ${backend.type} for ${id}`);
-    }
+    backends[id] = createBackend(id, backend, store);
   }
   return backends;
 }
-
-function normalizeTarget(target: string): string {
-  if (typeof target !== "string") throw new Error("Delegation target must be a string");
-  if (target.startsWith("category:") || target.startsWith("agent:")) return target;
-  throw new Error("Delegation target must use category:<name> or agent:<name>");
+function createBackend(id: string, backend: BackendConfig, store: RunStore): BackendAdapter {
+  if (backend.type === "opencode-cli") {
+    return createCommandBackend(
+      { ...OPENCODE_DEFAULTS, ...backend, id } as never,
+      { runStore: store },
+    );
+  }
+  if (backend.type === "command") {
+    return createCommandBackend({ ...backend, id } as never, { runStore: store });
+  }
+  if (backend.type === "koma-sdk") {
+    return createKomaBackend({ ...backend, id }, { runStore: store });
+  }
+  throw new Error(`Unknown backend type ${backend.type} for ${id}`);
 }

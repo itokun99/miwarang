@@ -10,14 +10,13 @@ describe("Senpi extension registration", () => {
       "miwarang_wait",
       "miwarang_cancel",
     ]);
-    expect(tools.get("miwarang_delegate").parameters.required).toEqual(["target", "prompt"]);
+    expect(tools.get("miwarang_delegate").parameters.required).toEqual(["prompt"]);
   });
 
-  test("delegates an OMO agent route without forwarding it as a harness agent", async () => {
+  test("delegates by prompt through the primary backend with its configured agent", async () => {
     const { tools, calls } = makeHarness();
 
     const result = await invoke(tools.get("miwarang_delegate"), {
-      target: "agent:explore",
       prompt: "List relevant files",
       mode: "background",
     });
@@ -26,14 +25,15 @@ describe("Senpi extension registration", () => {
       "start",
       {
         cwd: "/workspace",
-        target: "agent:explore",
         prompt: "List relevant files",
+        agent: "Orchestrator",
       },
     ]);
     expect(result.details).toMatchObject({
       sessionId: "ses_background",
-      resolvedVia: "exact",
+      resolvedVia: "primary",
       backend: "opencode",
+      agent: "Orchestrator",
     });
     expect(result.details).not.toHaveProperty("model");
   });
@@ -64,7 +64,6 @@ describe("Senpi extension registration", () => {
     const ctx = { cwd: "/workspace", sessionId: "thread_abc123" };
 
     const result = await invoke(tools.get("miwarang_delegate"), {
-      target: "agent:explore",
       prompt: "List relevant files",
       mode: "background",
     }, ctx);
@@ -76,7 +75,7 @@ describe("Senpi extension registration", () => {
     });
     expect(calls[0]).toEqual([
       "start",
-      { cwd: "/workspace", target: "agent:explore", prompt: "List relevant files" },
+      { cwd: "/workspace", prompt: "List relevant files", agent: "Orchestrator" },
     ]);
   });
 
@@ -103,24 +102,39 @@ describe("Senpi extension registration", () => {
     });
   });
 
-  test("redirects routed native tasks and leaves unrelated tasks alone", async () => {
-    const { handlers } = makeHarness();
-    const handler = handlers.get("tool_call")[0];
+  test("a backend override delegates to that backend only", async () => {
+    const { tools, calls } = makeHarness();
 
-    const redirected = await handler({
-      toolName: "task",
-      input: {
-        category: "quick",
-        prompt: "Inspect this project",
-        run_in_background: true,
-      },
-    });
-    const unchanged = await handler({
-      toolName: "task",
-      input: { category: "architect", prompt: "Design the system" },
+    const result = await invoke(tools.get("miwarang_delegate"), {
+      prompt: "Write the docs",
+      backend: "commandcode",
     });
 
-    expect(redirected).toMatchObject({ block: true });
-    expect(unchanged).toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(result.details).toMatchObject({
+      backend: "commandcode",
+      resolvedVia: "override",
+      agent: "General",
+    });
+  });
+
+  test("unknown backend overrides fail closed", async () => {
+    const { tools } = makeHarness();
+
+    await expect(
+      invoke(tools.get("miwarang_delegate"), {
+        prompt: "Write the docs",
+        backend: "missing",
+      }),
+    ).rejects.toThrow(/Backend missing is not configured/);
+  });
+
+  test("an empty prompt is rejected before any backend runs", async () => {
+    const { tools, calls } = makeHarness();
+
+    await expect(
+      invoke(tools.get("miwarang_delegate"), { prompt: "" }),
+    ).rejects.toThrow(/prompt must be a non-empty string/);
+    expect(calls).toEqual([]);
   });
 });

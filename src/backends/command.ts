@@ -2,7 +2,6 @@ import { spawn as spawnProcess } from "node:child_process";
 import { RunStore } from "../runs/store.ts";
 
 const MAX_CAPTURE_BYTES = 1024 * 1024;
-const LIST_MODELS_TIMEOUT_MS = 30_000;
 const SECRET_PATTERNS: RegExp[] = [
   /(Bearer\s+)[^\s"'`]+/gi,
   /((?:api[-_]?key|token|secret)\s*[:=]\s*)[^\s"'`]+/gi,
@@ -14,18 +13,14 @@ export interface CommandConfig {
   promptInput?: string;
   timeoutMs?: number;
   id?: string;
-  listModelsArgv?: string[];
-  model?: string;
   agent?: string;
   [key: string]: unknown;
 }
 
 export interface CommandRequest {
   prompt: string;
-  model?: string;
   agent?: string;
   cwd?: string;
-  target?: string;
 }
 
 export interface Invocation {
@@ -49,8 +44,8 @@ export function buildCommandInvocation(config: CommandConfig, request: CommandRe
   if (!Array.isArray(config.args) || config.args.some((arg) => typeof arg !== "string")) {
     throw new Error("Command backend args must be a string array");
   }
-  if (typeof request.prompt !== "string") {
-    throw new Error("Delegated task prompt must be a string");
+  if (typeof request.prompt !== "string" || !request.prompt) {
+    throw new Error("Delegated task prompt must be a non-empty string");
   }
 
   const promptInput = config.promptInput ?? "stdin";
@@ -59,13 +54,11 @@ export function buildCommandInvocation(config: CommandConfig, request: CommandRe
   }
 
   const values: Record<string, unknown> = {
-    model: request.model ?? config.model,
     agent: request.agent ?? config.agent,
     cwd: request.cwd,
-    target: request.target,
   };
   const args = config.args.map((arg) =>
-    arg.replace(/\{\{(model|agent|cwd|target)\}\}/g, (_match: string, key: string) => {
+    arg.replace(/\{\{(agent|cwd)\}\}/g, (_match: string, key: string) => {
       const value = values[key];
       if (typeof value !== "string") {
         throw new Error(`Command argument requires the ${key} value`);
@@ -85,32 +78,6 @@ export function buildCommandInvocation(config: CommandConfig, request: CommandRe
   };
 }
 
-// Command CLIs that expose a model listing (for example `commandcode
-// --list-models`) print one model per line as an id token followed by a
-// description column. Section headings, the count header, and footer lines
-// have no description column and are skipped; ids ending in `:free`/`-free`
-// are zero-cost so freeOnly routes can target them. Tokens without a
-// provider prefix keep the bare id.
-export function parseCommandModelList(stdout: unknown) {
-  const models: unknown[] = [];
-  for (const line of String(stdout ?? "").split("\n")) {
-    const match = line.match(/^(\S+)(?: {2,}|\t)(\S)/);
-    if (!match || !match[1]) continue;
-    const token = match[1];
-    if (token.endsWith(":")) continue;
-    const slash = token.indexOf("/");
-    const providerID = slash < 1 ? "" : token.slice(0, slash);
-    const id = slash < 1 ? token : token.slice(slash + 1);
-    const free = /(:free|-free)$/i.test(token);
-    models.push({
-      providerID,
-      id,
-      cost: free ? { input: 0, output: 0 } : { input: 1, output: 1 },
-    });
-  }
-  return models;
-}
-
 interface CommandDependencies {
   spawn?: typeof spawnProcess;
   runStore?: RunStore;
@@ -126,14 +93,6 @@ export function createCommandBackend(
   config: CommandConfig,
   dependencies: CommandDependencies = {},
 ) {
-  if (
-    config.listModelsArgv !== undefined &&
-    (!Array.isArray(config.listModelsArgv) ||
-      config.listModelsArgv.length === 0 ||
-      config.listModelsArgv.some((arg) => typeof arg !== "string"))
-  ) {
-    throw new Error("Command backend listModelsArgv must be a non-empty string array");
-  }
   const spawn = dependencies.spawn ?? spawnProcess;
   const runStore = dependencies.runStore ?? new RunStore();
   const active = new Map<string, ActiveRun>();
@@ -211,24 +170,6 @@ export function createCommandBackend(
     }
   }
 
-  // Availability probe for command CLIs that can list their models. Any
-  // failure returns undefined so the caller falls back to the configured
-  // candidates instead of blocking every delegation on an unreachable list
-  // command.
-  async function listModels() {
-    if (!config.listModelsArgv) return undefined;
-    const child = spawn(config.command, config.listModelsArgv, {
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    const completed = await withTimeout(captureChild(child), LIST_MODELS_TIMEOUT_MS, () =>
-      child.kill("SIGTERM"),
-    ).catch(() => undefined);
-    if (!completed || completed.exitCode !== 0) return undefined;
-    const models = parseCommandModelList(completed.stdout);
-    return models.length ? models : undefined;
-  }
-
   async function wait(runId: string) {
     const run = active.get(runId);
     if (run) {
@@ -261,7 +202,7 @@ export function createCommandBackend(
     return { runId, state: "cancelling", cancelled: true };
   }
 
-  return { runForeground, start, wait, cancel, listModels };
+  return { runForeground, start, wait, cancel };
 }
 
 function captureChild(

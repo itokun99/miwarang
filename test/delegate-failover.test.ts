@@ -1,19 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { invoke, makeHarness } from "./support/extension-harness.ts";
 
-const providerFailure = (id) =>
+const providerFailure = (id: string) =>
   `OpenCode session ${id} failed: provider.quota (402) Upstream request failed: Endpoint is unavailable.`;
 
-function commandBackend(behavior = {}) {
-  const calls = [];
+function commandBackend(behavior: Record<string, any> = {}) {
+  const calls: unknown[] = [];
   return {
     calls,
-    runForeground: async (request) => {
+    runForeground: async (request: any) => {
       calls.push(request);
       if (behavior.runForeground) return behavior.runForeground(request, calls);
       return { sessionId: "ses_command", text: "Command fallback result" };
     },
-    start: async (request) => {
+    start: async (request: any) => {
       calls.push(request);
       if (behavior.start) return behavior.start(request, calls);
       return { runId: "run_command", state: "running" };
@@ -24,25 +24,10 @@ function commandBackend(behavior = {}) {
 }
 
 describe("delegate backend failover", () => {
-  test("an OpenCode provider error falls back to the configured backend fallback", async () => {
-    const config = {
-      backends: {
-        opencode: { type: "opencode-v2", command: "opencode" },
-        commandcode: { type: "command", command: "commandcode" },
-      },
-      routes: {
-        "category:quick": {
-          backend: "opencode",
-          fallbacks: [{ backend: "commandcode" }],
-        },
-      },
-    };
-    const opencodeCalls = [];
+  test("an OpenCode provider error falls back to the next backend in the chain", async () => {
+    const opencodeCalls: unknown[] = [];
     const opencode = {
-      listModels: async () => {
-        throw new Error("OpenCode model list must not be queried");
-      },
-      runForeground: async (request) => {
+      runForeground: async (request: any) => {
         opencodeCalls.push(request);
         throw new Error(providerFailure("ses_default"));
       },
@@ -54,22 +39,20 @@ describe("delegate backend failover", () => {
     };
     const commandcode = commandBackend();
     const { tools } = makeHarness({
-      config,
-      backends: { opencode, commandcode },
+      backends: { opencode, commandcode, koma: commandBackend() },
     });
 
     const result = await invoke(tools.get("miwarang_delegate"), {
-      target: "category:quick",
       prompt: "Inspect this project",
     });
 
     expect(opencodeCalls).toEqual([
-      { cwd: "/workspace", target: "category:quick", prompt: "Inspect this project" },
+      { cwd: "/workspace", prompt: "Inspect this project", agent: "Orchestrator" },
     ]);
     expect(commandcode.calls[0]).toEqual({
       cwd: "/workspace",
-      target: "category:quick",
       prompt: "Inspect this project",
+      agent: "General",
     });
     expect(result.content[0].text).toBe("Command fallback result");
     expect(result.details).toMatchObject({
@@ -79,19 +62,10 @@ describe("delegate backend failover", () => {
     });
   });
 
-  test("an OpenCode failure surfaces when no backend fallback exists", async () => {
-    const config = {
-      backends: { opencode: { type: "opencode-v2", command: "opencode" } },
-      routes: {
-        "category:quick": { backend: "opencode" },
-      },
-    };
-    const calls = [];
+  test("an OpenCode failure surfaces when the chain has no fallback", async () => {
+    const calls: unknown[] = [];
     const opencode = {
-      listModels: async () => {
-        throw new Error("OpenCode model list must not be queried");
-      },
-      runForeground: async (request) => {
+      runForeground: async (request: any) => {
         calls.push(request);
         throw new Error(providerFailure("ses_default"));
       },
@@ -99,135 +73,67 @@ describe("delegate backend failover", () => {
       wait: async () => ({}),
       cancel: async () => ({}),
     };
-    const { tools } = makeHarness({ config, backends: { opencode } });
+    const { tools } = makeHarness({
+      config: {
+        backends: { opencode: { type: "opencode-cli", command: "opencode", args: ["run"] } },
+        delegation: ["opencode"],
+      },
+      backends: { opencode },
+    });
 
     await expect(
       invoke(tools.get("miwarang_delegate"), {
-        target: "category:quick",
         prompt: "Inspect",
       }),
     ).rejects.toThrow(/provider\.quota/);
     expect(calls).toEqual([
-      { cwd: "/workspace", target: "category:quick", prompt: "Inspect" },
+      { cwd: "/workspace", prompt: "Inspect", agent: undefined },
     ]);
   });
 
-  test("non-provider OpenCode failures do not trigger backend failover", async () => {
-    const config = {
-      backends: {
-        opencode: { type: "opencode-v2", command: "opencode" },
-        commandcode: { type: "command", command: "commandcode" },
-      },
-      routes: {
-        "category:quick": {
-          backend: "opencode",
-          fallbacks: [{ backend: "commandcode" }],
-        },
-      },
-    };
-    let commandCalls = 0;
-    const { tools } = makeHarness({
-      config,
-      backends: {
-        opencode: {
-          listModels: async () => {
-            throw new Error("OpenCode model list must not be queried");
-          },
-          runForeground: async () => {
-            throw new Error("OpenCode configuration rejected the request");
-          },
-          start: async () => ({}),
-          wait: async () => ({}),
-          cancel: async () => ({}),
-        },
-        commandcode: commandBackend({
-          runForeground: async () => {
-            commandCalls += 1;
-            return { sessionId: "ses_command", text: "Should not run" };
-          },
-        }),
-      },
-    });
-
-    await expect(
-      invoke(tools.get("miwarang_delegate"), {
-        target: "category:quick",
-        prompt: "Inspect",
-      }),
-    ).rejects.toThrow(/configuration rejected/);
-    expect(commandCalls).toBe(0);
-  });
-
-  test("an OpenCode background-start failure falls back before a run ID is returned", async () => {
-    const config = {
-      backends: {
-        opencode: { type: "opencode-v2", command: "opencode" },
-        commandcode: { type: "command", command: "commandcode" },
-      },
-      routes: {
-        "category:deep-high": {
-          backend: "opencode",
-          fallbacks: [{ backend: "commandcode" }],
-        },
+  test("non-provider failures do not trigger backend failover", async () => {
+    const opencode = {
+      runForeground: async () => {
+        throw new Error("OpenCode run failed: configuration rejected the request");
       },
     };
     const commandcode = commandBackend();
-    const { tools } = makeHarness({
-      config,
-      backends: {
-        opencode: {
-          listModels: async () => {
-            throw new Error("OpenCode model list must not be queried");
-          },
-          start: async (request) => {
-            expect(request).toEqual({
-              cwd: "/workspace",
-              target: "category:deep-high",
-              prompt: "Inspect this project",
-            });
-            throw new Error(providerFailure("ses_default"));
-          },
-          runForeground: async () => {
-            throw new Error("should not run foreground");
-          },
-          wait: async () => ({}),
-          cancel: async () => ({}),
-        },
-        commandcode,
+    const { tools } = makeHarness({ backends: { opencode, commandcode, koma: commandcode } });
+
+    await expect(
+      invoke(tools.get("miwarang_delegate"), {
+        prompt: "Inspect",
+      }),
+    ).rejects.toThrow(/configuration rejected/);
+    expect(commandcode.calls).toEqual([]);
+  });
+
+  test("an OpenCode background-start failure falls back before a run ID is returned", async () => {
+    const opencode = {
+      runForeground: async () => ({}),
+      start: async () => {
+        throw new Error(providerFailure("ses_default"));
       },
-    });
+      wait: async () => ({}),
+      cancel: async () => ({}),
+    };
+    const commandcode = commandBackend();
+    const { tools } = makeHarness({ backends: { opencode, commandcode, koma: commandcode } });
 
     const result = await invoke(tools.get("miwarang_delegate"), {
-      target: "category:deep-high",
       prompt: "Inspect this project",
       mode: "background",
     });
 
-    expect(commandcode.calls[0]).toEqual({
-      cwd: "/workspace",
-      target: "category:deep-high",
-      prompt: "Inspect this project",
-    });
     expect(result.details).toMatchObject({
       backend: "commandcode",
       fallback: true,
       fallbackIndex: 1,
     });
+    expect(result.details).toHaveProperty("runId", "run_command");
   });
 
   test("command quota errors advance to the configured backend fallback", async () => {
-    const config = {
-      backends: {
-        commandcode: { type: "command", command: "commandcode" },
-        koma: { type: "koma-sdk", command: "koma" },
-      },
-      routes: {
-        "category:writing": {
-          backend: "commandcode",
-          fallbacks: [{ backend: "koma" }],
-        },
-      },
-    };
     const commandcode = commandBackend({
       runForeground: async () => {
         throw new Error(
@@ -235,9 +141,9 @@ describe("delegate backend failover", () => {
         );
       },
     });
-    const komaCalls = [];
+    const komaCalls: unknown[] = [];
     const koma = {
-      runForeground: async (request) => {
+      runForeground: async (request: any) => {
         komaCalls.push(request);
         return { sessionId: "ses_koma", text: "Koma fallback result" };
       },
@@ -245,20 +151,16 @@ describe("delegate backend failover", () => {
       wait: async () => ({}),
       cancel: async () => ({}),
     };
-    const { tools } = makeHarness({ config, backends: { commandcode, koma } });
+    const { tools } = makeHarness({ backends: { opencode: commandcode, commandcode, koma } });
 
     const result = await invoke(tools.get("miwarang_delegate"), {
-      target: "category:writing",
       prompt: "Inspect this project",
     });
 
     expect(komaCalls).toEqual([
-      { cwd: "/workspace", target: "category:writing", prompt: "Inspect this project" },
+      { cwd: "/workspace", prompt: "Inspect this project" },
     ]);
     expect(result.content[0].text).toBe("Koma fallback result");
-    expect(result.details).toMatchObject({
-      backend: "koma",
-      fallback: true,
-    });
+    expect(result.details).toMatchObject({ backend: "koma", fallback: true, fallbackIndex: 2 });
   });
 });

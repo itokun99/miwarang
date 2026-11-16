@@ -101,7 +101,7 @@ describe("formatting", () => {
     ];
 
     expect(formatRunTable(runs, 5_000)).toContain(
-      `- ${RUN_ID}  completed  5s  category:quick (opencode)`,
+      `- ${RUN_ID}  completed  5s  (opencode)`,
     );
     expect(formatRunTable([])).toContain("no background runs");
   });

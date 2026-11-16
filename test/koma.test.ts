@@ -32,7 +32,6 @@ function state(overrides) {
   return {
     session_id: "session-1",
     cwd: "/workspace",
-    model_id: "koma/apple",
     policy: { plan: "forbid", approval: "reject" },
     turn: null,
     working: false,
@@ -150,18 +149,18 @@ async function makeBackend(childFactory, config = {}) {
 }
 
 describe("koma sdk backend", () => {
-  test("foreground execution creates a session with the routed model and returns the final answer", async () => {
+  test("foreground execution creates a session without a Miwarang model and returns the final answer", async () => {
     const adapter = scriptedAdapter();
     const { backend } = await makeBackend(() => fakeChild({ respond: adapter.respond }));
 
     await expect(
-      backend.runForeground({ cwd: "/workspace", target: "category:quick", model: "koma/apple", prompt: "do the work" }),
+      backend.runForeground({ cwd: "/workspace", prompt: "do the work" }),
     ).resolves.toEqual({ sessionId: "session-1", text: "DONE_KOMA" });
 
     expect(adapter.requests.find((r) => r.method === "create")).toEqual({
       id: expect.any(String),
       method: "create",
-      params: { cwd: "/workspace", model_id: "koma/apple", policy: { plan: "forbid", approval: "reject" } },
+      params: { cwd: "/workspace", policy: { plan: "forbid", approval: "reject" } },
     });
     expect(adapter.requests.find((r) => r.method === "submit").params).toEqual({ text: "do the work" });
     expect(adapter.requests.at(-1).method).toBe("detach");
@@ -228,7 +227,6 @@ describe("koma sdk backend", () => {
     const started = await backend.start({
       cwd: "/workspace",
       target: "category:quick",
-      model: "koma/apple",
       prompt: "do the work",
     });
     expect(started).toEqual({ runId: expect.stringMatching(/^run_/), state: "running" });

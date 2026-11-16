@@ -1,12 +1,12 @@
 # Miwarang Senpi Delegate
 
-Miwarang registers Senpi tools that delegate work to a configured backend. The default backend is the local OpenCode v2 service, called through `opencode api` so OpenCode retains its own authentication. A command backend accepts any configured executable and argument array for other coding agents.
+Miwarang registers Senpi tools that delegate work by prompt to configured second-orchestrator harnesses. It is a unified delegation tool: any agent platform (OMO, OpenCode plugins, Command Code mods, Claude Code mods, …) can call `miwarang_delegate` with a prompt, and the configured backend harnesses own their models and agents. Miwarang never selects a model and never runs an agent itself.
 
 ## Requirements
 
 - Bun 1.4 or later
 - Senpi 5.1.30 or later
-- OpenCode v2 for the default backend
+- At least one configured harness: OpenCode CLI, Command Code, Koma, or any command-line agent
 
 ## Install
 
@@ -38,140 +38,47 @@ senpi -e ~/Projects/miwarang/src/extension.ts
 
 Set `MIWARANG_CONFIG` to use a different config file. Without it, the extension reads `~/.config/miwarang/config.json`.
 
-## Multi-harness routing
+## How delegation works
 
-Miwarang routes each OMO target to a configured backend. Routes resolve in this order: exact key, then the `category:*` or `agent:*` wildcard, then `defaultRoute`. A target that does not resolve fails closed with `No route configured for <target>`.
+1. The calling agent invokes `miwarang_delegate` with a `prompt` (plus optional `mode`, `backend`, `cwd`).
+2. Miwarang walks the configured `delegation` chain in order and hands the prompt to the first available backend.
+3. The backend harness (OpenCode CLI, Command Code, Koma, …) executes the task with its own configured model and agent.
+4. The result returns to the caller, which validates it.
 
-### Category → backend
+There are no routes and no targets: the prompt is the contract. If a backend fails with a provider error (quota, rate limit, upstream session failure), Miwarang continues to the next backend in the chain for foreground work and for background work before a run ID is returned. Once a background run has started, failures surface through `miwarang_wait` instead of being retried silently.
 
-| Target | Backend |
-| --- | --- |
-| `category:quick` | `opencode` |
-| `category:unspecified-low` | `opencode` |
-| `category:unspecified-high` | `opencode` |
-| `category:deep-low` | `opencode` |
-| `category:deep-high` | `opencode` |
-| `category:ultrabrain` | `opencode` |
-| `category:artistry` | `opencode` |
-| `category:architect` | `opencode` |
-| `category:writing` | `commandcode` |
-| `category:visual-engineering` | `opencode` |
-| `agent:explore` | `opencode` |
-| `agent:librarian` | `opencode` |
-| `agent:plan-consultant` | `opencode` |
-| `agent:plan-reviewer` | `opencode` |
-| `agent:omo-native-code-reviewer` | `commandcode` |
-| `agent:omo-native-gate-reviewer` | `commandcode` |
-| `agent:omo-native-qa-executor` | `commandcode` |
+### Per-backend agents
 
-All 10 categories and 7 agents are routed in the example config below. `category:ultrabrain` and `category:deep-high` set `blockNativeTask: false`; the top-level `blockNativeTask: "all"` blocks native `task` calls for the other configured targets.
+Each backend can name the agent its harness should run, via the backend's own `agent` config field. For example, OpenCode can delegate to an `Orchestrator` agent while Command Code delegates to its `General` agent. Miwarang passes that agent through (`--agent {{agent}}` for OpenCode) and never overrides a harness's model.
 
-Every Command Code lane — `category:quick`, `category:writing`, and the three `agent:omo-native-*` routes — also carries koma as a final fallback, so the bundled free model absorbs work when OpenCode and Command Code are unavailable.
+## Tools
 
-OpenCode sessions use the model configured in the OpenCode harness and the `orchestrator` agent. Miwarang does not query OpenCode's model catalogue or apply `freeOnly` restrictions. Command Code routes still use their configured model candidates in order, but Miwarang does not filter candidates by free/paid status. Both backends may have ordered fallbacks.
+- `miwarang_delegate({ prompt, mode?, backend?, cwd? })` — delegate a task. `mode` is `foreground` (default) or `background`. `backend` overrides the chain order for an intentional harness choice; it must name a configured backend.
+- `miwarang_wait({ sessionId | runId, backend? })` — wait for a background run and return its terminal result.
+- `miwarang_cancel({ sessionId | runId, backend? })` — interrupt a background run.
+- `/miwarang` — list the background runs tracked in the current session.
 
-### Block policy
+Background runs carry the caller's thread/session identity (`omoThreadId`) alongside the backend run/session ID, so the main orchestrator can correlate and validate results.
 
-Native OMO `task` calls are intercepted based on an explicit policy, independent of route presence:
+## Configuration
 
-- Top-level `blockNativeTask` (default `"configured"`): `true` or `"configured"` blocks targets that resolve to an exact or wildcard route; `"all"` blocks every category/agent target (requires a wildcard route or `defaultRoute`); `false` or `"none"` disables blocking; a string array blocks only the listed targets.
-- Per-route `blockNativeTask` overrides the top-level value for that route. Set it to `false` to route a target without intercepting native `task` calls for it.
-
-When a native `task` call is blocked, the parent agent is guided to call `miwarang_delegate` with the same prompt and target.
-
-### Per-call overrides
-
-Pass `backend` only for an intentional harness override; it must name a configured backend. OpenCode targets reject `model` and `agent` overrides: sessions use the configured default model and the `orchestrator` agent. Command-line `agent` overrides work only when that backend's args contain `{{agent}}`. An OMO target such as `agent:explore` selects a Miwarang route; it is not a harness agent name. Never forward the OMO session's own model.
-
-### Model selection and availability
-
-Model choice belongs to the target harness, not to OMO:
-
-- `opencode-v2` sessions omit the `model` field and use the OpenCode configuration for the workspace. Miwarang selects the `orchestrator` agent, and does not query the model catalogue or enforce legacy `freeOnly` fields on OpenCode routes.
-- Command backends use `models` as an ordered candidate list. If `listModelsArgv` is configured, Miwarang skips candidates absent from that harness's live catalogue; it does not filter candidates by free/paid status. Route order controls the candidate priority; the example puts free candidates before cheap models. A command backend without a model-list probe treats its configured list as authoritative.
-- Command routes may omit `models` to inherit `defaultModels`; OpenCode routes may omit `models` because OpenCode chooses its own default.
-- A route can opt into cross-backend failover with an ordered `fallbacks` array. Command Code candidates continue through that list for quota, rate-limit, credit, five-hour, weekly-limit, and HTTP 429 failures. OpenCode runtime failures move to the next configured backend fallback rather than trying Miwarang's model list. Background runtime failures are reported through `miwarang_wait`.
-
-Example route using OpenCode's configured default model and a Command Code fallback:
-
-```json
+```jsonc
 {
-  "backend": "opencode",
-  "fallbacks": [
-    {
-      "backend": "commandcode",
-      "models": [
-        "reflection/beam:free",
-        "poolside/laguna-s-2.1-free",
-        "stealth/glyph-cluster:free",
-        "deepseek/deepseek-v4-flash",
-        "qwen/qwen3.8-flash",
-        "qwen/qwen3.7-flash"
-      ]
-    }
-  ]
-}
-```
-
-### Commandcode recipe
-
-To add the commandcode harness as a backend:
-
-```json
-"commandcode": {
-  "type": "command",
-  "command": "commandcode",
-  "args": ["-p", "--model", "{{model}}", "--no-session", "--yolo", "--tools-enable", "agent,agent_output", "-t"],
-  "promptInput": "argument",
-  "timeoutMs": 900000,
-  "listModelsArgv": ["--list-models"]
-}
-```
-
-Command Code print mode uses its built-in General agent unless a harness agent is explicitly selected. `--tools-enable agent,agent_output` lets General delegate to the agents registered in that Command Code installation. The CLI has no `--agent` flag, so Miwarang does not pass OMO agent names as Command Code agent overrides.
-
-`--yolo` is required: commandcode's print mode denies file writes and shell by default, so without `--yolo` the harness cannot perform edits or run tools. With `--yolo`, commandcode auto-approves every tool call — scope each delegation with an explicit `cwd` and prefer dedicated worktrees for risky edits. `listModelsArgv` turns on the availability check: `commandcode --list-models` feeds the configured candidate selection.
-
-### Koma recipe
-
-To add the [koma](https://koma.run) harness as a backend:
-
-```json
-"koma": {
-  "type": "koma-sdk",
-  "command": "koma",
-  "args": ["sdk", "serve"],
-  "timeoutMs": 900000
-}
-```
-
-Koma has no reply-printing headless mode: `koma run --prompt … --once` prints only session metadata, and the assistant reply never reaches its stdout. Miwarang therefore talks to koma's public SDK stdio adapter, a JSON Lines protocol (`hello`, `create`, `submit`, `state` events, `interrupt`, `detach`) documented in the koma repository under `src-core-sdk/protocol/CONTRACT.md`. Nothing is interpolated into a shell: the adapter spawns `koma sdk serve` as an argv array and streams the prompt over that process's stdin.
-
-A koma route names model candidates exactly like a command backend, and there is no model-list probe, so the configured list is authoritative. koma's bundled free model is `koma/apple` (provider `koma free`, `api_type` `koma_free`, endpoint `https://koma.run/api/v1/koma-free`); it is used unless the route names another candidate. Add `"policy"` only to change the session policy — the default is `{ "plan": "forbid", "approval": "reject" }`, matching koma's own headless default, where `plan` is `allow` or `forbid` and `approval` is `default` or `reject`.
-
-Delegations run headless: koma starts a turn, Miwarang waits for the terminal turn state, and returns the newest assistant message. Background runs expose a Miwarang run ID; `miwarang_wait` returns the recorded result, and `miwarang_cancel` interrupts the active turn.
-
-In the example config, koma is appended as a last-resort fallback after the Command Code candidates. Move it earlier in a route's `fallbacks` array to prefer the free model before the paid candidates.
-
-### Example config
-
-The committed example config (`config.example.json`) routes all 10 categories and 7 agents:
-
-```json
-{
-  "defaultBackend": "opencode",
   "backends": {
     "opencode": {
-      "type": "opencode-v2",
-      "command": "opencode"
+      "type": "opencode-cli",
+      "command": "opencode",
+      "args": ["run"],
+      "promptInput": "argument",
+      "timeoutMs": 900000
     },
     "commandcode": {
       "type": "command",
       "command": "commandcode",
-      "args": ["-p", "--model", "{{model}}", "--no-session", "--yolo", "--tools-enable", "agent,agent_output", "-t"],
+      "args": ["-p", "--no-session", "--yolo", "--max-turns", "200", "--tools-enable", "agent,agent_output", "-t"],
       "promptInput": "argument",
       "timeoutMs": 900000,
-      "listModelsArgv": ["--list-models"]
+      "agent": "General"
     },
     "koma": {
       "type": "koma-sdk",
@@ -180,175 +87,51 @@ The committed example config (`config.example.json`) routes all 10 categories an
       "timeoutMs": 900000
     }
   },
-  "routes": {
-    "category:quick": {
-      "backend": "opencode",
-      "fallbacks": [
-        {
-          "backend": "commandcode",
-          "models": [
-            "reflection/beam:free",
-            "poolside/laguna-s-2.1-free",
-            "stealth/glyph-cluster:free",
-            "deepseek/deepseek-v4-flash",
-            "qwen/qwen3.8-flash",
-            "qwen/qwen3.7-flash"
-          ]
-        },
-        {
-          "backend": "koma",
-          "models": ["koma/apple"]
-        }
-      ]
-    },
-    "category:unspecified-low": {
-      "backend": "opencode"
-    },
-    "category:deep-low": {
-      "backend": "opencode"
-    },
-    "category:unspecified-high": {
-      "backend": "opencode"
-    },
-    "category:writing": {
-      "backend": "commandcode",
-      "models": [
-        "reflection/beam:free",
-        "poolside/laguna-s-2.1-free",
-        "stealth/glyph-cluster:free",
-        "deepseek/deepseek-v4-flash",
-        "qwen/qwen3.8-flash",
-        "qwen/qwen3.7-flash"
-      ],
-      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
-    },
-    "category:artistry": {
-      "backend": "opencode"
-    },
-    "category:architect": {
-      "backend": "opencode"
-    },
-    "category:visual-engineering": {
-      "backend": "opencode"
-    },
-    "category:ultrabrain": {
-      "backend": "opencode",
-      "blockNativeTask": false
-    },
-    "category:deep-high": {
-      "backend": "opencode",
-      "blockNativeTask": false
-    },
-    "agent:explore": {
-      "backend": "opencode"
-    },
-    "agent:librarian": {
-      "backend": "opencode"
-    },
-    "agent:plan-consultant": {
-      "backend": "opencode"
-    },
-    "agent:plan-reviewer": {
-      "backend": "opencode"
-    },
-    "agent:omo-native-code-reviewer": {
-      "backend": "commandcode",
-      "models": [
-        "reflection/beam:free",
-        "poolside/laguna-s-2.1-free",
-        "stealth/glyph-cluster:free",
-        "deepseek/deepseek-v4-flash",
-        "qwen/qwen3.8-flash",
-        "qwen/qwen3.7-flash"
-      ],
-      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
-    },
-    "agent:omo-native-gate-reviewer": {
-      "backend": "commandcode",
-      "models": [
-        "reflection/beam:free",
-        "poolside/laguna-s-2.1-free",
-        "stealth/glyph-cluster:free",
-        "deepseek/deepseek-v4-flash",
-        "qwen/qwen3.8-flash",
-        "qwen/qwen3.7-flash"
-      ],
-      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
-    },
-    "agent:omo-native-qa-executor": {
-      "backend": "commandcode",
-      "models": [
-        "reflection/beam:free",
-        "poolside/laguna-s-2.1-free",
-        "stealth/glyph-cluster:free",
-        "deepseek/deepseek-v4-flash",
-        "qwen/qwen3.8-flash",
-        "qwen/qwen3.7-flash"
-      ],
-      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
-    },
-    "category:*": {
-      "backend": "opencode"
-    }
-  },
-  "defaultRoute": {
-    "backend": "opencode"
-  },
-  "blockNativeTask": "all",
+  "delegation": ["opencode", "commandcode", "koma"],
   "runsDirectory": "~/.local/state/miwarang/runs"
 }
 ```
 
-## Foreground and background work
+- `backends` — map of backend id to its config. `type` is one of `opencode-cli`, `command`, or `koma-sdk`.
+- `delegation` — ordered chain of backend ids; the first available backend wins, later entries act as fallbacks.
+- `agent` (per backend) — the harness agent Miwarang delegates to. It is passed through `{{agent}}` in the backend's args when present; Koma owns its agent internally.
+- `runsDirectory` — where background command/koma run records are stored.
 
-Use `miwarang_delegate` with:
+### Backend types
 
-- `target`: a configured category or agent key, such as `category:quick` or `agent:explore`
-- `prompt`: the delegated task
-- `mode`: `foreground` (default) or `background`
-- optional `model`, `agent`, `backend`, and `cwd` for command backends; OpenCode model/agent overrides are not used
+- `opencode-cli` — runs `opencode run` (the supported glm-5.3-flashmation path per [opencode.ai/docs](https://opencode.ai/docs/cli)). The OpenCode harness supplies its configured model; Miwarang only passes the configured agent. The old experimental `opencode-v2` SDK backend was removed in v0.9.0.
+- `command` — any executable plus an argv array. Placeholders: `{{agent}}` and `{{cwd}}`. `promptInput` is `argument` (append the prompt as one argument) or `stdin` (default; write the prompt to stdin). Commands run without a shell; prompts are never interpolated into a command string.
+- `koma-sdk` — speaks Koma's SDK stdio adapter (`koma sdk serve`), a JSON Lines protocol (`hello`, `create`, `submit`, `state` events, `interrupt`, `detach`). Koma's headless `koma run` prints only session metadata, so the SDK adapter is the supported path. Koma owns its model and agent; Miwarang sends only the prompt, cwd, and policy (default `{ "plan": "forbid", "approval": "reject" }`).
 
-Foreground execution waits and returns the final assistant text. Background execution returns an OpenCode session ID or a Miwarang command-run ID. Pass an OpenCode ID as `sessionId` to `miwarang_wait` or `miwarang_cancel`; pass a command-run ID as `runId`.
+### Migrating from v0.8.x
 
-OpenCode operations use the authenticated `opencode api` CLI. The extension does not store OpenCode credentials or construct OpenCode-specific request headers.
+The v0.8 keys `routes`, `defaultRoute`, `defaultModels`, `pricePolicy`, `defaultBackend`, and `blockNativeTask`, and the `opencode-v2` backend type, were removed. Miwarang rejects configs containing them with a message naming the replacement. Move the preferred backend to the front of `delegation`, put per-harness agents on each backend, and delete route/model lists — the harnesses own model choice now.
 
-## Tracking background runs
-
-Background runs are tracked directly by Miwarang without creating child OMO or
-DAG watcher processes:
-
-- The TUI footer status line shows active runs and runtime.
-- `/miwarang` lists tracked runs with state, elapsed time, and target.
-- `miwarang_wait` retrieves a terminal result by the returned `sessionId` or
-  `runId`.
-- `miwarang_cancel` requests cancellation using that same identifier.
-
-The main agent can start multiple background delegations and wait for each
-returned ID. There is no separate DAG watch process to become orphaned.
-
-## Configuring other CLI agents
-
-Add a backend of type `command` and route a target to it:
+### Command Code recipe
 
 ```json
-{
-  "backends": {
-    "opencode": {
-      "type": "opencode-v2",
-      "command": "opencode"
-    },
-    "opencode-cli": {
-      "type": "command",
-      "command": "opencode",
-      "args": ["run", "--model", "{{model}}"],
-      "promptInput": "argument",
-      "timeoutMs": 300000
-    }
-  }
+"commandcode": {
+  "type": "command",
+  "command": "commandcode",
+  "args": ["-p", "--no-session", "--yolo", "--max-turns", "200", "--tools-enable", "agent,agent_output", "-t"],
+  "promptInput": "argument",
+  "timeoutMs": 900000,
+  "agent": "General"
 }
 ```
 
-Command arguments are executed as an argv array without a shell. Supported placeholders are `{{model}}`, `{{agent}}`, `{{cwd}}`, and `{{target}}`. `promptInput` is either `argument` (append the prompt as one argument) or `stdin` (write the prompt to stdin). Configure the exact command and flags supported by the installed CLI.
+Command Code print mode uses its built-in General agent unless the harness is configured otherwise. `--tools-enable agent,agent_output` lets General delegate to the agents registered in that Command Code installation. `--yolo` is required: print mode denies file writes and shell by default, so without it the harness cannot perform edits or run tools. With `--yolo`, commandcode glm-5.3-flash-approves every tool call — scope each delegation with an explicit `cwd` and prefer dedicated worktrees for risky edits.
+
+## Tracking background runs
+
+Background runs are tracked directly by Miwarang without creating child OMO or DAG watcher processes:
+
+- The TUI footer status line shows active runs and runtime.
+- `/miwarang` lists tracked runs with state, elapsed time, and backend.
+- `miwarang_wait` retrieves a terminal result by the returned `runId`.
+- `miwarang_cancel` requests cancellation using that same identifier.
+
+The main agent can start multiple background delegations and wait for each returned ID. There is no separate DAG watch process to become orphaned.
 
 Command-run metadata is stored under `~/.local/state/miwarang/runs` by default, or under `runsDirectory` in the config. Prompts and environment variables are not saved in run records.
 
@@ -362,5 +145,6 @@ Miwarang Senpi Delegate is distributed under the MIT License. See [LICENSE](LICE
 bun test
 bunx tsc --noEmit
 senpi -e ./src/extension.ts --list-models
-opencode api GET /api/model
 ```
+
+The test suite covers the delegation chain, failover, per-backend agent passthrough, config validation and migration errors, the command and koma adapters, run tracking, and the wait/cancel lifecycle.

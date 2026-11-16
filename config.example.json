@@ -1,139 +1,45 @@
 {
-  "defaultBackend": "opencode",
   "backends": {
     "opencode": {
-      "type": "opencode-v2",
-      "command": "opencode"
+      "type": "opencode-cli",
+      "command": "opencode",
+      "args": [
+        "run"
+      ],
+      "promptInput": "argument",
+      "timeoutMs": 900000
     },
     "commandcode": {
       "type": "command",
       "command": "commandcode",
-      "args": ["-p", "--model", "{{model}}", "--no-session", "--yolo", "--tools-enable", "agent,agent_output", "-t"],
+      "args": [
+        "-p",
+        "--no-session",
+        "--yolo",
+        "--max-turns",
+        "200",
+        "--tools-enable",
+        "agent,agent_output",
+        "-t"
+      ],
       "promptInput": "argument",
       "timeoutMs": 900000,
-      "listModelsArgv": ["--list-models"]
+      "agent": "General"
     },
     "koma": {
       "type": "koma-sdk",
       "command": "koma",
-      "args": ["sdk", "serve"],
+      "args": [
+        "sdk",
+        "serve"
+      ],
       "timeoutMs": 900000
     }
   },
-  "routes": {
-    "category:quick": {
-      "backend": "opencode",
-      "fallbacks": [
-        {
-          "backend": "commandcode",
-          "models": [
-            "reflection/beam:free",
-            "poolside/laguna-s-2.1-free",
-            "stealth/glyph-cluster:free",
-            "deepseek/deepseek-v4-flash",
-            "qwen/qwen3.8-flash",
-            "qwen/qwen3.7-flash"
-          ]
-        },
-        {
-          "backend": "koma",
-          "models": ["koma/apple"]
-        }
-      ]
-    },
-    "category:unspecified-low": {
-      "backend": "opencode"
-    },
-    "category:deep-low": {
-      "backend": "opencode"
-    },
-    "category:unspecified-high": {
-      "backend": "opencode"
-    },
-    "category:writing": {
-      "backend": "commandcode",
-      "models": [
-        "reflection/beam:free",
-        "poolside/laguna-s-2.1-free",
-        "stealth/glyph-cluster:free",
-        "deepseek/deepseek-v4-flash",
-        "qwen/qwen3.8-flash",
-        "qwen/qwen3.7-flash"
-      ],
-      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
-    },
-    "category:artistry": {
-      "backend": "opencode"
-    },
-    "category:architect": {
-      "backend": "opencode"
-    },
-    "category:visual-engineering": {
-      "backend": "opencode"
-    },
-    "category:ultrabrain": {
-      "backend": "opencode",
-      "blockNativeTask": false
-    },
-    "category:deep-high": {
-      "backend": "opencode",
-      "blockNativeTask": false
-    },
-    "agent:explore": {
-      "backend": "opencode"
-    },
-    "agent:librarian": {
-      "backend": "opencode"
-    },
-    "agent:plan-consultant": {
-      "backend": "opencode"
-    },
-    "agent:plan-reviewer": {
-      "backend": "opencode"
-    },
-    "agent:omo-native-code-reviewer": {
-      "backend": "commandcode",
-      "models": [
-        "reflection/beam:free",
-        "poolside/laguna-s-2.1-free",
-        "stealth/glyph-cluster:free",
-        "deepseek/deepseek-v4-flash",
-        "qwen/qwen3.8-flash",
-        "qwen/qwen3.7-flash"
-      ],
-      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
-    },
-    "agent:omo-native-gate-reviewer": {
-      "backend": "commandcode",
-      "models": [
-        "reflection/beam:free",
-        "poolside/laguna-s-2.1-free",
-        "stealth/glyph-cluster:free",
-        "deepseek/deepseek-v4-flash",
-        "qwen/qwen3.8-flash",
-        "qwen/qwen3.7-flash"
-      ],
-      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
-    },
-    "agent:omo-native-qa-executor": {
-      "backend": "commandcode",
-      "models": [
-        "reflection/beam:free",
-        "poolside/laguna-s-2.1-free",
-        "stealth/glyph-cluster:free",
-        "deepseek/deepseek-v4-flash",
-        "qwen/qwen3.8-flash",
-        "qwen/qwen3.7-flash"
-      ],
-      "fallbacks": [{ "backend": "koma", "models": ["koma/apple"] }]
-    },
-    "category:*": {
-      "backend": "opencode"
-    }
-  },
-  "defaultRoute": {
-    "backend": "opencode"
-  },
-  "blockNativeTask": "all",
+  "delegation": [
+    "opencode",
+    "commandcode",
+    "koma"
+  ],
   "runsDirectory": "~/.local/state/miwarang/runs"
 }

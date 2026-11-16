@@ -1,90 +1,47 @@
 import { setupExtension } from "../../src/extension.ts";
+import type { MiwarangConfig } from "../../src/config.ts";
+import type { BackendAdapter } from "../../src/delegate-routing.ts";
 
-export const config = {
+export const config: MiwarangConfig = {
   backends: {
-    opencode: { type: "opencode-v2", command: "opencode" },
+    opencode: {
+      type: "opencode-cli",
+      command: "opencode",
+      args: ["run", "--agent", "{{agent}}"],
+      promptInput: "argument",
+      agent: "Orchestrator",
+    },
+    commandcode: {
+      type: "command",
+      command: "commandcode",
+      args: ["-p", "-t"],
+      promptInput: "argument",
+      agent: "General",
+    },
+    koma: { type: "koma-sdk", command: "koma", args: ["sdk", "serve"] },
   },
-  routes: {
-    "category:quick": { backend: "opencode" },
-    "agent:explore": { backend: "opencode", agent: "explore" },
-  },
+  delegation: ["opencode", "commandcode", "koma"],
 };
 
-export const liveModels = [
-  {
-    providerID: "opencode",
-    id: "space-bunny-free",
-    cost: { input: 0, output: 0 },
-  },
-  {
-    providerID: "opencode-go",
-    id: "longcat-2.5-preview-free",
-    cost: { input: 0, output: 0 },
-  },
-  {
-    providerID: "qwen",
-    id: "qwen3.8-max",
-    cost: { input: 0, output: 0 },
-  },
-];
-
-export const wildcardConfig = {
+export const commandOnlyConfig: MiwarangConfig = {
   backends: {
-    opencode: { type: "opencode-v2", command: "opencode" },
-    commandcode: { type: "command", command: "commandcode" },
+    command: { type: "command", command: "commandcode", args: ["-p"], agent: "General" },
+    claude: { type: "command", command: "claude", args: ["-p"], agent: "general" },
   },
-  routes: {
-    "category:*": {
-      backend: "opencode",
-      models: ["qwen/qwen3.8-max"],
-    },
-  },
+  delegation: ["command", "claude"],
 };
 
-export const legacyConfig = {
-  backends: {
-    opencode: { type: "opencode-v2", command: "opencode" },
-  },
-  routes: {
-    "category:quick": {
-      backend: "opencode",
-      models: ["opencode/space-bunny-free", "opencode-go/longcat-2.5-preview-free"],
-      freeOnly: true,
-    },
-    "agent:explore": {
-      backend: "opencode",
-      models: ["opencode-go/longcat-2.5-preview-free"],
-      freeOnly: true,
-      agent: "explore",
-    },
-  },
-};
-
-export const wildcardOverrideConfig = {
-  backends: {
-    opencode: { type: "opencode-v2", command: "opencode" },
-    commandcode: { type: "command", command: "commandcode" },
-  },
-  routes: {
-    "category:quick": {
-      backend: "opencode",
-      models: ["opencode/space-bunny-free"],
-      freeOnly: true,
-    },
-    "category:*": {
-      backend: "commandcode",
-      models: ["qwen/qwen3.8-max", "moonshotai/kimi-k3"],
-    },
-  },
-};
-
-export function makeHarness({ config: activeConfig = config, backends, runStore, timers } = {}) {
-  const tools = new Map();
-  const handlers = new Map();
-  const commands = new Map();
-  const calls = [];
-  const backend = {
-    listModels: async () => liveModels,
+export function makeHarness({ config: activeConfig = config, backends, runStore, timers }: {
+  config?: any;
+  backends?: Record<string, any>;
+  runStore?: any;
+  timers?: any;
+} = {}) {
+  const tools: Map<string, any> = new Map();
+  const handlers = new Map<string, any[]>();
+  const commands = new Map<string, any>();
+  const calls: unknown[][] = [];
+  const backend: any = {
     runForeground: async (request) => {
       calls.push(["foreground", request]);
       return { sessionId: "ses_foreground", text: "Foreground result" };
@@ -102,8 +59,7 @@ export function makeHarness({ config: activeConfig = config, backends, runStore,
       return { sessionId, interrupted: true };
     },
   };
-  const commandBackend = {
-    listModels: async () => undefined,
+  const commandBackend: any = {
     runForeground: async (request) => {
       calls.push(["foreground", request]);
       return { sessionId: "ses_command_foreground", text: "Command foreground result" };
@@ -121,15 +77,15 @@ export function makeHarness({ config: activeConfig = config, backends, runStore,
       return { sessionId, interrupted: true };
     },
   };
-  const pi = {
+  const pi: any = {
     cwd: "/workspace",
-    registerTool(tool) {
+    registerTool(tool: any) {
       tools.set(tool.name, tool);
     },
-    registerCommand(name, command) {
+    registerCommand(name: string, command: any) {
       commands.set(name, command);
     },
-    on(name, handler) {
+    on(name: string, handler: any) {
       const registered = handlers.get(name) ?? [];
       registered.push(handler);
       handlers.set(name, registered);
@@ -138,7 +94,7 @@ export function makeHarness({ config: activeConfig = config, backends, runStore,
 
   setupExtension(pi, {
     config: activeConfig,
-    backends: backends ?? { opencode: backend, commandcode: commandBackend },
+    backends: backends ?? { opencode: backend, commandcode: commandBackend, koma: commandBackend },
     runStore,
     timers: timers ?? { setInterval: () => 0, clearInterval: () => {} },
   });
@@ -146,19 +102,19 @@ export function makeHarness({ config: activeConfig = config, backends, runStore,
   return { tools, handlers, commands, calls, backend, commandBackend };
 }
 
-export async function invoke(tool, params, ctx = { cwd: "/workspace" }) {
-  return tool.execute("test-call", params, undefined, undefined, ctx);
+export async function invoke(tool: any, params: any, ctx: any = { cwd: "/workspace" }) {
+  return tool.execute("test-call", params, undefined, undefined, ctx) as Promise<any>;
 }
 
 export function uiRecorder() {
-  const statuses = [];
-  const notices = [];
+  const statuses: [string, string | undefined][] = [];
+  const notices: [string, string | undefined][] = [];
   return {
     statuses,
     notices,
     ui: {
-      setStatus: (key, text) => statuses.push([key, text]),
-      notify: (text, level) => notices.push([text, level]),
+      setStatus: (key: string, text: string | undefined) => statuses.push([key, text]),
+      notify: (text: string, level?: string) => notices.push([text, level as string | undefined]),
     },
   };
 }
