@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { realpathSync } from "node:fs";
@@ -74,7 +75,7 @@ describe("miwarang installer", () => {
       const homeConfig = JSON.parse(await readFile(join(fakeHome, ".claude/claude.json"), "utf8"));
       expect(homeConfig.mcpServers.miwarang.args[0]).toContain("mcp-server.ts");
 
-      const removed = await uninstall("claude-code");
+      const removed = await uninstall("claude-code", false);
       expect(removed.map((p) => realpathSync(p))).toContain(realpathSync(join(project, ".mcp.json")));
       const after = JSON.parse(await readFile(join(project, ".mcp.json"), "utf8"));
       expect(after.mcpServers.miwarang).toBeUndefined();
@@ -91,13 +92,37 @@ describe("miwarang installer", () => {
     expect(mcpSnippet()).toContain("miwarang");
   });
 
+  test("npm bin launcher uses Node to run the Bun installer", async () => {
+    const project = await mkdtemp(join(tmpdir(), "miwarang-bin-"));
+
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn(
+        "node",
+        [join(REPO, "bin/miwarang.js"), "init", "--target", "mcp"],
+        { cwd: project, env: process.env, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
+      child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+      child.once("error", reject);
+      child.once("close", (code) => resolve({ code, stdout, stderr }));
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('"mcpServers"');
+    expect(result.stdout).toContain('"miwarang"');
+    expect(result.stdout).toContain("src/mcp-server.ts");
+    expect(result.stderr).toBe("");
+  }, 15000);
+
   test("uninstall removes senpi extension artifacts", async () => {
     const fakeHome = await mkdtemp(join(tmpdir(), "miwarang-un-"));
     const realHome = process.env.HOME;
     process.env.MIWARANG_HOME = fakeHome;
     try {
       await runInstall("senpi");
-      const removed = await uninstall("senpi");
+      const removed = await uninstall("senpi", false);
       expect(removed.some((p) => p.endsWith("extensions/miwarang/extension.ts"))).toBe(true);
       expect(removed.some((p) => p.endsWith("extensions/miwarang/extension.js"))).toBe(true);
     } finally {

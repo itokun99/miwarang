@@ -1,6 +1,6 @@
 {
   "name": "miwarang",
-  "version": "0.10.3",
+  "version": "0.10.4",
   "description": "Unified prompt-driven delegation across configured coding-agent harnesses, with native extensions and an MCP server.",
   "license": "MIT",
   "type": "module",
@@ -18,9 +18,10 @@
     "typescript": "^5.6"
   },
   "bin": {
-    "miwarang": "./src/installer.ts"
+    "miwarang": "./bin/miwarang.js"
   },
   "files": [
+    "bin/miwarang.js",
     "src",
     "integrations",
     "skills",
