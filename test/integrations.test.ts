@@ -5,13 +5,21 @@ import { join } from "node:path";
 
 const REPO = new URL("..", import.meta.url).pathname;
 
-async function makeConfig(dir: string) {
+async function makeConfig(dir: string, options: { slow?: boolean } = {}) {
   const configPath = join(dir, "config.json");
   await writeFile(
     configPath,
     JSON.stringify({
       backends: {
-        echo: { type: "command", command: "echo", args: ["WRAP_OK"], promptInput: "argument", timeoutMs: 5000 },
+        echo: options.slow
+          ? {
+              type: "command",
+              command: "sh",
+              args: ["-c", "sleep 10; printf WRAP_OK"],
+              promptInput: "argument",
+              timeoutMs: 15000,
+            }
+          : { type: "command", command: "echo", args: ["WRAP_OK"], promptInput: "argument", timeoutMs: 5000 },
       },
       delegation: ["echo"],
     }),
@@ -98,7 +106,7 @@ describe("host integrations (phase 3)", () => {
 
   test("Pi extension registers one miwarang tool handling delegate, wait, and cancel", async () => {
     const dir = await mkdtemp(join(tmpdir(), "miwarang-pi-"));
-    const configPath = await makeConfig(dir);
+    const configPath = await makeConfig(dir, { slow: true });
     process.env.MIWARANG_CONFIG = configPath;
     const registered: any[] = [];
     const pi = { registerTool: (tool: any) => registered.push(tool) };
@@ -107,17 +115,18 @@ describe("host integrations (phase 3)", () => {
     expect(registered).toHaveLength(1);
     const tool = registered[0];
     expect(tool.name).toBe("miwarang");
-    const started = await tool.execute("call1", { prompt: "hi", cwd: dir }, undefined, undefined, { session: { id: "pi_session" } });
-    expect(started.content[0].text).toContain("WRAP_OK");
+    // Keep the child alive so cancellation is deterministic rather than racing
+    // an immediate echo command that may finish before cancel() runs.
+    const started = await tool.execute("call1", { prompt: "hi", cwd: dir, mode: "background" }, undefined, undefined, { session: { id: "pi_session" } });
     expect(started.details.version).toBe(1);
-
-    expect(started.details.mode).toBe("foreground");
-
-    const waitResult = await tool.execute("call2", { prompt: "hi again", cwd: dir, mode: "background" }, undefined, undefined, { session: { id: "pi_session" } });
-    const runId = waitResult.details.runId ?? waitResult.details.sessionId;
+    expect(started.details.state).toBe("running");
+    const runId = started.details.runId ?? started.details.sessionId;
     expect(typeof runId).toBe("string");
     const cancelResult = await tool.execute("call3", { runId, action: "cancel" }, undefined, undefined, {});
-    expect(["cancelled", "failed", "cancelling"]).toContain(cancelResult.details.state ?? cancelResult.details.state);
+    expect(cancelResult.details.state).toBe("cancelled");
+    expect(cancelResult.details.signal).toBe("SIGTERM");
+    const waitResult = await tool.execute("call4", { runId, action: "wait" }, undefined, undefined, {});
+    expect(waitResult.details.state).toBe("cancelled");
   }, 15000);
 
   test("OMP extension confirms exec-tier actions and can skip via env", async () => {

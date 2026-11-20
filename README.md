@@ -68,7 +68,21 @@ The server exposes `miwarang_delegate`, `miwarang_wait`, and `miwarang_cancel`; 
 
 ## Delegation skill
 
-`skills/miwarang/SKILL.md` is the companion skill: when to delegate, the tool contract, the response envelope, and host wiring recipes.
+The Miwarang tool and its Agent Skill live in this same repository. Install
+the skill with the skills CLI:
+
+```sh
+npx skills add itokun99/miwarang --skill miwarang
+```
+
+List available skills before installing with
+`npx skills add itokun99/miwarang --list`. The skill is at
+`skills/miwarang/SKILL.md`; its detailed references cover parameters,
+configuration, lifecycle, troubleshooting, and host installation.
+The repo also includes `skills.sh.json` display metadata and
+`npm run check:skill` to validate the skill files. After the npm package is
+published, users who install it as a dependency can use the skills CLI's
+experimental npm skill sync.
 
 ## How delegation works
 

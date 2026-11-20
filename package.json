@@ -1,11 +1,12 @@
 {
   "name": "miwarang",
-  "version": "0.10.2",
+  "version": "0.10.3",
+  "description": "Unified prompt-driven delegation across configured coding-agent harnesses, with native extensions and an MCP server.",
   "license": "MIT",
-  "private": true,
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
+    "check:skill": "node scripts/check-skill.mjs",
     "test": "bun test",
     "postinstall": "echo 'Run: npx miwarang init  (choose your host target)'"
   },
@@ -21,8 +22,10 @@
   },
   "files": [
     "src",
-    "integrations/*/dist",
+    "integrations",
     "skills",
+    "skills.sh.json",
+    "scripts/check-skill.mjs",
     "config.example.json",
     "extension.js"
   ]
